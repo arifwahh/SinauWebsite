@@ -1,26 +1,36 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15-alpine
     container_name: sinau_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: sinau_admin
-      POSTGRES_PASSWORD: sinau_secure_password
-      POSTGRES_DB: sinau_db
+      POSTGRES_USER: ${DB_USER:-sinau_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Isi DB_PASSWORD di file .env}
+      POSTGRES_DB: ${DB_NAME:-sinau_db}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sinau_admin} -d ${DB_NAME:-sinau_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - sinau_network
 
   redis:
     image: redis:7-alpine
     container_name: sinau_redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - sinau_network
 
@@ -29,20 +39,27 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: sinau_backend
+    restart: unless-stopped
     environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=sinau_admin
-      - DB_PASSWORD=sinau_secure_password
-      - DB_NAME=sinau_db
-      - REDIS_HOST=redis:6379
-      - JWT_SECRET=sinau_super_secret_jwt_key_2026
-      - PORT=8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-sinau_admin}
+      DB_PASSWORD: ${DB_PASSWORD:?Isi DB_PASSWORD di file .env}
+      DB_NAME: ${DB_NAME:-sinau_db}
+      REDIS_HOST: redis:6379
+      JWT_SECRET: ${JWT_SECRET:?Isi JWT_SECRET di file .env}
+      OFFLINE_KEY_MASTER: ${OFFLINE_KEY_MASTER:?Isi OFFLINE_KEY_MASTER di file .env}
+      MIDTRANS_SERVER_KEY: ${MIDTRANS_SERVER_KEY:-}
+      XENDIT_CALLBACK_TOKEN: ${XENDIT_CALLBACK_TOKEN:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
+      PORT: 8080
     ports:
       - "8080:8080"
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - sinau_network
 

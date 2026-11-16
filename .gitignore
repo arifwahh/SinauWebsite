@@ -1,0 +1,22 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Go
+backend/sinau-server
+backend/tmp/
+*.test
+*.out
+
+# Flutter
+flutter_app/.dart_tool/
+flutter_app/build/
+flutter_app/.flutter-plugins*
+flutter_app/.packages
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+.claude/settings.local.json
