@@ -11,6 +11,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/awmorecreative/sinau-backend/internal/database"
 	"github.com/awmorecreative/sinau-backend/internal/middleware"
@@ -19,12 +20,51 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CreateTransaction — FR-10/FR-11: pembelian kursus satuan.
+// calculateVoucherDiscount adalah fungsi murni untuk memvalidasi syarat voucher
+// dan menghitung potongan harga serta harga akhir (FR-12).
+func calculateVoucherDiscount(price float64, v models.Voucher, now time.Time) (discount float64, finalAmount float64, err error) {
+	if !v.IsActive {
+		return 0, price, errors.New("Kode voucher sudah tidak aktif")
+	}
+	if v.ExpiresAt != nil && now.After(*v.ExpiresAt) {
+		return 0, price, errors.New("Kode voucher sudah kedaluwarsa")
+	}
+	if v.UsageLimit != nil && v.UsedCount >= *v.UsageLimit {
+		return 0, price, errors.New("Kuota kode voucher sudah habis")
+	}
+	if price < v.MinPurchase {
+		return 0, price, errors.New("Harga kursus belum memenuhi minimum pembelian voucher")
+	}
+
+	switch v.DiscountType {
+	case "percentage":
+		if v.DiscountValue <= 0 || v.DiscountValue > 100 {
+			return 0, price, errors.New("Nilai persentase diskon tidak valid")
+		}
+		discount = math.Round((price*(v.DiscountValue/100))*100) / 100
+		if v.MaxDiscount != nil && discount > *v.MaxDiscount {
+			discount = *v.MaxDiscount
+		}
+	case "fixed":
+		discount = v.DiscountValue
+	default:
+		return 0, price, errors.New("Tipe diskon tidak dikenali")
+	}
+
+	if discount > price {
+		discount = price
+	}
+	finalAmount = math.Round((price-discount)*100) / 100
+	return discount, finalAmount, nil
+}
+
+// CreateTransaction — FR-10/FR-11/FR-12: pembelian kursus satuan dengan dukungan kode voucher.
 // user_id SELALU diambil dari token, bukan dari body request.
 func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 	var req struct {
 		CourseID       string `json:"course_id"`
 		PaymentGateway string `json:"payment_gateway"` // midtrans | xendit
+		VoucherCode    string `json:"voucher_code"`    // opsional (FR-12)
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
@@ -35,6 +75,7 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 	if req.PaymentGateway != "midtrans" && req.PaymentGateway != "xendit" {
 		return fiber.NewError(fiber.StatusBadRequest, "payment_gateway harus 'midtrans' atau 'xendit'")
 	}
+	req.VoucherCode = strings.ToUpper(strings.TrimSpace(req.VoucherCode))
 	userID := middleware.UserID(c)
 
 	cx, cancel := ctx(c)
@@ -59,14 +100,57 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "Anda sudah memiliki kursus ini")
 	}
 
-	// Kursus gratis: langsung didaftarkan tanpa payment gateway.
-	if price == 0 {
-		if _, err := database.DB.Exec(cx,
-			`INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-			userID, req.CourseID); err != nil {
+	var (
+		voucherID   *string
+		discount    float64
+		finalAmount = price
+	)
+
+	if req.VoucherCode != "" {
+		var v models.Voucher
+		err := database.DB.QueryRow(cx,
+			`SELECT id, code, discount_type::text, discount_value, max_discount, min_purchase,
+			        usage_limit, used_count, is_active, expires_at
+			 FROM vouchers WHERE code = $1`, req.VoucherCode,
+		).Scan(&v.ID, &v.Code, &v.DiscountType, &v.DiscountValue, &v.MaxDiscount, &v.MinPurchase,
+			&v.UsageLimit, &v.UsedCount, &v.IsActive, &v.ExpiresAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fiber.NewError(fiber.StatusBadRequest, "Kode voucher tidak ditemukan")
+		} else if err != nil {
 			return err
 		}
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "message": "Berhasil terdaftar di kursus gratis"})
+
+		discount, finalAmount, err = calculateVoucherDiscount(price, v, time.Now())
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		voucherID = &v.ID
+	}
+
+	// Kursus gratis atau diskon 100%: langsung didaftarkan tanpa payment gateway.
+	if finalAmount == 0 {
+		err := pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+			if voucherID != nil {
+				if _, err := tx.Exec(cx,
+					`UPDATE vouchers SET used_count = used_count + 1 WHERE id = $1`, *voucherID); err != nil {
+					return err
+				}
+			}
+			_, err := tx.Exec(cx,
+				`INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+				userID, req.CourseID)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"status":       "success",
+			"amount":       price,
+			"discount":     discount,
+			"final_amount": 0,
+			"message":      "Berhasil terdaftar di kursus",
+		})
 	}
 
 	externalTxID, err := newOrderID()
@@ -80,9 +164,9 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 
 	var txID string
 	err = database.DB.QueryRow(cx,
-		`INSERT INTO transactions (user_id, course_id, amount, final_amount, payment_gateway, status, external_transaction_id, snap_token)
-		 VALUES ($1, $2, $3, $3, $4, 'pending', $5, $6) RETURNING id`,
-		userID, req.CourseID, price, req.PaymentGateway, externalTxID, snapToken,
+		`INSERT INTO transactions (user_id, course_id, voucher_id, amount, discount, final_amount, payment_gateway, status, external_transaction_id, snap_token)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9) RETURNING id`,
+		userID, req.CourseID, voucherID, price, discount, finalAmount, req.PaymentGateway, externalTxID, snapToken,
 	).Scan(&txID)
 	if err != nil {
 		return err
@@ -93,6 +177,8 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 		"transaction_id":          txID,
 		"external_transaction_id": externalTxID,
 		"amount":                  price,
+		"discount":                discount,
+		"final_amount":            finalAmount,
 		"snap_token":              snapToken,
 		"payment_url":             "https://app.sandbox.midtrans.com/snap/v2/vtweb/" + snapToken,
 	})
@@ -104,7 +190,7 @@ func (h *Handler) GetMyTransactions(c *fiber.Ctx) error {
 	defer cancel()
 
 	rows, err := database.DB.Query(cx,
-		`SELECT id, user_id, course_id, amount, final_amount, payment_gateway, status,
+		`SELECT id, user_id, course_id, voucher_id, amount, discount, final_amount, payment_gateway, status,
 		        external_transaction_id, paid_at, created_at
 		 FROM transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
 		middleware.UserID(c))
@@ -116,8 +202,8 @@ func (h *Handler) GetMyTransactions(c *fiber.Ctx) error {
 	list := make([]models.Transaction, 0)
 	for rows.Next() {
 		var t models.Transaction
-		if err := rows.Scan(&t.ID, &t.UserID, &t.CourseID, &t.Amount, &t.FinalAmount, &t.PaymentGateway,
-			&t.Status, &t.ExternalTxID, &t.PaidAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.CourseID, &t.VoucherID, &t.Amount, &t.Discount,
+			&t.FinalAmount, &t.PaymentGateway, &t.Status, &t.ExternalTxID, &t.PaidAt, &t.CreatedAt); err != nil {
 			return err
 		}
 		list = append(list, t)
@@ -236,12 +322,13 @@ func (h *Handler) applyPaymentStatus(c *fiber.Ctx, externalTxID, newStatus strin
 func updateTransaction(cx context.Context, tx pgx.Tx, externalTxID, newStatus string, amount float64, method string) error {
 	var (
 		txID, userID, courseID, current string
+		voucherID                       *string
 		finalAmount                     float64
 	)
 	err := tx.QueryRow(cx,
-		`SELECT id, user_id, course_id, status, final_amount FROM transactions
+		`SELECT id, user_id, course_id, voucher_id, status, final_amount FROM transactions
 		 WHERE external_transaction_id = $1 FOR UPDATE`, externalTxID,
-	).Scan(&txID, &userID, &courseID, &current, &finalAmount)
+	).Scan(&txID, &userID, &courseID, &voucherID, &current, &finalAmount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fiber.NewError(fiber.StatusNotFound, "Transaksi tidak ditemukan")
 	} else if err != nil {
@@ -268,6 +355,12 @@ func updateTransaction(cx context.Context, tx pgx.Tx, externalTxID, newStatus st
 			`UPDATE transactions SET status = 'paid', paid_at = NOW(), payment_method = COALESCE($2, payment_method)
 			 WHERE id = $1`, txID, methodArg); err != nil {
 			return err
+		}
+		if voucherID != nil {
+			if _, err := tx.Exec(cx,
+				`UPDATE vouchers SET used_count = used_count + 1 WHERE id = $1`, *voucherID); err != nil {
+				return err
+			}
 		}
 		_, err := tx.Exec(cx,
 			`INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT (user_id, course_id) DO NOTHING`,

@@ -44,6 +44,11 @@ func main() {
 	})
 
 	auth := middleware.RequireAuth(cfg.JWTSecret)
+	instructorOrAdmin := middleware.RequireRoles(
+		models.RoleInternalInstructor, models.RoleExternalInstructor, models.RoleSuperAdmin,
+	)
+	curatorOrAdmin := middleware.RequireRoles(models.RoleCurator, models.RoleSuperAdmin)
+	superAdminOnly := middleware.RequireRoles(models.RoleSuperAdmin)
 
 	// Auth — rate limit untuk mencegah brute force
 	authLimiter := limiter.New(limiter.Config{Max: 10, Expiration: time.Minute})
@@ -53,14 +58,29 @@ func main() {
 	api.Post("/auth/logout", auth, h.Logout)
 	api.Get("/auth/me", auth, h.Me)
 
-	// Kursus (pembelian satuan)
+	// Katalog & Kategori (FR-20)
+	api.Get("/categories", h.GetCategories)
 	api.Get("/courses", h.GetCourses)
 	api.Get("/courses/:id", h.GetCourseDetail)
-	api.Post("/courses", auth,
-		middleware.RequireRoles(models.RoleInternalInstructor, models.RoleExternalInstructor, models.RoleSuperAdmin),
-		h.CreateCourse)
+	api.Post("/courses", auth, instructorOrAdmin, h.CreateCourse)
 
-	// Transaksi
+	// Kurikulum: Modul, Pelajaran & Ulasan (FR-21, FR-22, FR-26)
+	api.Post("/courses/:id/modules", auth, instructorOrAdmin, h.CreateModule)
+	api.Post("/modules/:id/lessons", auth, instructorOrAdmin, h.CreateLesson)
+	api.Get("/lessons/:id", auth, h.GetLessonDetail)
+	api.Get("/courses/:id/reviews", h.GetCourseReviews)
+	api.Post("/courses/:id/reviews", auth, h.CreateOrUpdateReview)
+
+	// Pembelajaran: Kursus Saya, Progress, Kuis & Sertifikat (FR-30 s/d FR-34)
+	api.Get("/my-courses", auth, h.GetMyEnrollments)
+	api.Post("/lessons/:id/progress", auth, h.UpdateLessonProgress)
+	api.Post("/lessons/:id/quiz", auth, instructorOrAdmin, h.CreateQuiz)
+	api.Get("/lessons/:id/quiz", auth, h.GetLessonQuiz)
+	api.Post("/quizzes/:id/submit", auth, h.SubmitQuiz)
+	api.Get("/certificates/my", auth, h.GetMyCertificates)
+	api.Get("/certificates/verify/:code", h.VerifyCertificate)
+
+	// Transaksi & Pembayaran (FR-10, FR-11, FR-12)
 	api.Post("/transactions", auth, h.CreateTransaction)
 	api.Get("/transactions", auth, h.GetMyTransactions)
 
@@ -70,6 +90,14 @@ func main() {
 
 	// Download offline terenkripsi (FR-24)
 	api.Post("/offline/token", auth, h.GenerateOfflineToken)
+
+	// Admin Panel & Kurator (FR-72, FR-90 s/d FR-92)
+	admin := api.Group("/admin", auth)
+	admin.Post("/categories", curatorOrAdmin, h.CreateCategory)
+	admin.Patch("/courses/:id/status", curatorOrAdmin, h.ReviewCourseStatus)
+	admin.Post("/vouchers", superAdminOnly, h.CreateVoucher)
+	admin.Patch("/users/:id/role", superAdminOnly, h.UpdateUserRole)
+	admin.Get("/analytics/overview", superAdminOnly, h.GetAdminOverview)
 
 	log.Printf("Sinau Backend berjalan di port %s", cfg.Port)
 	log.Fatal(app.Listen(":" + cfg.Port))

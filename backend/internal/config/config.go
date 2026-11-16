@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -82,10 +84,16 @@ func Load() *Config {
 	return cfg
 }
 
-// DSN mengembalikan connection string PostgreSQL.
+// DSN mengembalikan connection string PostgreSQL dengan URL-encoding aman untuk karakter spesial.
 func (c *Config) DSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName, c.DBSSLMode)
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(c.DBUser, c.DBPassword),
+		Host:     net.JoinHostPort(c.DBHost, c.DBPort),
+		Path:     c.DBName,
+		RawQuery: "sslmode=" + url.QueryEscape(c.DBSSLMode),
+	}
+	return u.String()
 }
 
 func decodeHexKey(s string) ([]byte, error) {

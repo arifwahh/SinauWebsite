@@ -2,7 +2,9 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/awmorecreative/sinau-backend/internal/database"
@@ -26,23 +28,147 @@ func scanCourse(row pgx.Row, course *models.Course) error {
 		&course.Status, &course.RatingAvg, &course.TotalReviews, &course.CreatedAt)
 }
 
-// GetCourses — katalog publik, hanya kursus berstatus published.
-func (h *Handler) GetCourses(c *fiber.Ctx) error {
-	limit := c.QueryInt("limit", 20)
+// GetCategories — FR-20: daftar kategori kursus publik.
+func (h *Handler) GetCategories(c *fiber.Ctx) error {
+	cx, cancel := ctx(c)
+	defer cancel()
+
+	rows, err := database.DB.Query(cx,
+		`SELECT id, name, slug, description, created_at FROM categories ORDER BY name ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	cats := make([]models.Category, 0)
+	for rows.Next() {
+		var cat models.Category
+		if err := rows.Scan(&cat.ID, &cat.Name, &cat.Slug, &cat.Description, &cat.CreatedAt); err != nil {
+			return err
+		}
+		cats = append(cats, cat)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"status": "success", "data": cats})
+}
+
+// courseFilterParams menampung parameter filter katalog (FR-20).
+type courseFilterParams struct {
+	Search     string
+	CategoryID int
+	Level      string
+	MinPrice   *float64
+	MaxPrice   *float64
+	MinRating  *float64
+	Limit      int
+	Offset     int
+}
+
+func buildCourseFilterQuery(p courseFilterParams) (string, []any, error) {
+	conds := []string{"status = 'published'"}
+	args := make([]any, 0, 8)
+	nextArg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	if q := strings.TrimSpace(p.Search); q != "" {
+		ph := nextArg("%" + q + "%")
+		conds = append(conds, fmt.Sprintf("(title ILIKE %s OR COALESCE(subtitle, '') ILIKE %s)", ph, ph))
+	}
+	if p.CategoryID > 0 {
+		conds = append(conds, "category_id = "+nextArg(p.CategoryID))
+	}
+	if p.Level != "" {
+		if !validLevels[p.Level] {
+			return "", nil, errors.New("Filter level tidak valid")
+		}
+		conds = append(conds, "level = "+nextArg(p.Level))
+	}
+	if p.MinPrice != nil {
+		if *p.MinPrice < 0 {
+			return "", nil, errors.New("min_price tidak boleh negatif")
+		}
+		conds = append(conds, "price >= "+nextArg(*p.MinPrice))
+	}
+	if p.MaxPrice != nil {
+		if *p.MaxPrice < 0 {
+			return "", nil, errors.New("max_price tidak boleh negatif")
+		}
+		conds = append(conds, "price <= "+nextArg(*p.MaxPrice))
+	}
+	if p.MinRating != nil {
+		if *p.MinRating < 0 || *p.MinRating > 5 {
+			return "", nil, errors.New("min_rating harus antara 0 dan 5")
+		}
+		conds = append(conds, "rating_avg >= "+nextArg(*p.MinRating))
+	}
+
+	limit := p.Limit
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	offset := c.QueryInt("offset", 0)
+	offset := p.Offset
 	if offset < 0 {
 		offset = 0
+	}
+
+	limitPH := nextArg(limit)
+	offsetPH := nextArg(offset)
+	sql := fmt.Sprintf(
+		`SELECT %s FROM courses WHERE %s ORDER BY created_at DESC LIMIT %s OFFSET %s`,
+		courseColumns, strings.Join(conds, " AND "), limitPH, offsetPH,
+	)
+	return sql, args, nil
+}
+
+func parseOptionalFloat(s string) (*float64, error) {
+	if s == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// GetCourses — FR-20: katalog publik dengan pencarian & filter (q, category_id, level, min_price, max_price, min_rating).
+func (h *Handler) GetCourses(c *fiber.Ctx) error {
+	minPrice, err := parseOptionalFloat(c.Query("min_price"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Parameter min_price tidak valid")
+	}
+	maxPrice, err := parseOptionalFloat(c.Query("max_price"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Parameter max_price tidak valid")
+	}
+	minRating, err := parseOptionalFloat(c.Query("min_rating"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Parameter min_rating tidak valid")
+	}
+
+	params := courseFilterParams{
+		Search:     c.Query("q"),
+		CategoryID: c.QueryInt("category_id", 0),
+		Level:      c.Query("level"),
+		MinPrice:   minPrice,
+		MaxPrice:   maxPrice,
+		MinRating:  minRating,
+		Limit:      c.QueryInt("limit", 20),
+		Offset:     c.QueryInt("offset", 0),
+	}
+	sql, args, err := buildCourseFilterQuery(params)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	rows, err := database.DB.Query(cx,
-		`SELECT `+courseColumns+` FROM courses WHERE status = 'published'
-		 ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	rows, err := database.DB.Query(cx, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -63,11 +189,12 @@ func (h *Handler) GetCourses(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"status": "success",
 		"data":   courses,
-		"meta":   fiber.Map{"limit": limit, "offset": offset},
+		"meta":   fiber.Map{"limit": params.Limit, "offset": params.Offset},
 	})
 }
 
-// GetCourseDetail — detail kursus publik (hanya yang sudah published).
+// GetCourseDetail — detail kursus publik beserta daftar modul & pelajaran (silabus).
+// content_url pelajaran disembunyikan kecuali is_free_preview = true.
 func (h *Handler) GetCourseDetail(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
@@ -81,7 +208,65 @@ func (h *Handler) GetCourseDetail(c *fiber.Ctx) error {
 		return err
 	}
 
-	return c.JSON(fiber.Map{"status": "success", "data": course})
+	modRows, err := database.DB.Query(cx,
+		`SELECT id, course_id, title, order_index, created_at
+		 FROM modules WHERE course_id = $1 ORDER BY order_index ASC`, course.ID)
+	if err != nil {
+		return err
+	}
+	defer modRows.Close()
+
+	modules := make([]models.Module, 0)
+	modIdx := make(map[string]int)
+	for modRows.Next() {
+		var m models.Module
+		if err := modRows.Scan(&m.ID, &m.CourseID, &m.Title, &m.OrderIndex, &m.CreatedAt); err != nil {
+			return err
+		}
+		m.Lessons = make([]models.Lesson, 0)
+		modIdx[m.ID] = len(modules)
+		modules = append(modules, m)
+	}
+	if err := modRows.Err(); err != nil {
+		return err
+	}
+
+	if len(modules) > 0 {
+		lesRows, err := database.DB.Query(cx,
+			`SELECT l.id, l.module_id, l.title, l.lesson_type::text, l.content_url,
+			        l.duration_seconds, l.order_index, l.is_free_preview, l.created_at
+			 FROM lessons l JOIN modules m ON m.id = l.module_id
+			 WHERE m.course_id = $1 ORDER BY l.order_index ASC`, course.ID)
+		if err != nil {
+			return err
+		}
+		defer lesRows.Close()
+
+		for lesRows.Next() {
+			var l models.Lesson
+			if err := lesRows.Scan(&l.ID, &l.ModuleID, &l.Title, &l.LessonType, &l.ContentURL,
+				&l.DurationSeconds, &l.OrderIndex, &l.IsFreePreview, &l.CreatedAt); err != nil {
+				return err
+			}
+			if !l.IsFreePreview {
+				l.ContentURL = nil // sembunyikan URL materi berbayar di endpoint katalog publik
+			}
+			if idx, ok := modIdx[l.ModuleID]; ok {
+				modules[idx].Lessons = append(modules[idx].Lessons, l)
+			}
+		}
+		if err := lesRows.Err(); err != nil {
+			return err
+		}
+	}
+
+	return c.JSON(fiber.Map{
+		"status": "success",
+		"data": fiber.Map{
+			"course":  course,
+			"modules": modules,
+		},
+	})
 }
 
 type createCourseRequest struct {
