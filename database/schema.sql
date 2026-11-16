@@ -78,13 +78,32 @@ CREATE TABLE modules (
 -- Lessons Table
 CREATE TABLE lessons (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    module_id UUID REFERENCES modules(id) ON DELETE CASCADE,
+    module_id UUID NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     lesson_type lesson_type NOT NULL,
     content_url TEXT, -- Video HLS URL, PDF URL, or Article body
-    duration_seconds INT DEFAULT 0,
+    duration_seconds INT NOT NULL DEFAULT 0,
     order_index INT NOT NULL,
-    is_free_preview BOOLEAN DEFAULT FALSE,
+    is_free_preview BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_modules_course ON modules(course_id, order_index);
+CREATE INDEX idx_lessons_module ON lessons(module_id, order_index);
+
+-- Vouchers & Promo Codes (FR-12, FR-91)
+CREATE TYPE discount_type AS ENUM ('percentage', 'fixed');
+
+CREATE TABLE vouchers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    code VARCHAR(50) UNIQUE NOT NULL,
+    discount_type discount_type NOT NULL DEFAULT 'percentage',
+    discount_value DECIMAL(12, 2) NOT NULL CHECK (discount_value > 0),
+    max_discount DECIMAL(12, 2) CHECK (max_discount IS NULL OR max_discount >= 0),
+    min_purchase DECIMAL(12, 2) NOT NULL DEFAULT 0.00 CHECK (min_purchase >= 0),
+    usage_limit INT CHECK (usage_limit IS NULL OR usage_limit > 0),
+    used_count INT NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    expires_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -93,8 +112,9 @@ CREATE TABLE transactions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    voucher_id UUID REFERENCES vouchers(id) ON DELETE SET NULL,
     amount DECIMAL(12, 2) NOT NULL,
-    discount DECIMAL(12, 2) DEFAULT 0.00,
+    discount DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
     final_amount DECIMAL(12, 2) NOT NULL,
     payment_gateway VARCHAR(50) NOT NULL DEFAULT 'midtrans', -- midtrans / xendit
     payment_method VARCHAR(50), -- va, qris, ewallet, cc
@@ -141,16 +161,64 @@ CREATE TABLE offline_download_tokens (
 );
 CREATE INDEX idx_offline_tokens_lookup ON offline_download_tokens(user_id, lesson_id, device_fingerprint);
 
--- Certificates
+-- Certificates (FR-34)
 CREATE TABLE certificates (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     certificate_code VARCHAR(100) UNIQUE NOT NULL,
     pdf_url TEXT NOT NULL,
-    issued_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    issued_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, course_id)
 );
+
+-- Course Reviews & Ratings (FR-26)
+CREATE TABLE course_reviews (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    comment TEXT,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, course_id)
+);
+CREATE INDEX idx_course_reviews_course ON course_reviews(course_id, created_at DESC);
+
+-- Quizzes & Final Exams (FR-31, FR-32)
+CREATE TYPE question_type AS ENUM ('multiple_choice', 'true_false', 'short_answer');
+
+CREATE TABLE quizzes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lesson_id UUID UNIQUE NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    passing_score INT NOT NULL DEFAULT 70 CHECK (passing_score >= 0 AND passing_score <= 100),
+    time_limit_minutes INT NOT NULL DEFAULT 0 CHECK (time_limit_minutes >= 0),
+    is_final_exam BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE quiz_questions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    quiz_id UUID NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+    question_text TEXT NOT NULL,
+    question_type question_type NOT NULL DEFAULT 'multiple_choice',
+    options JSONB NOT NULL DEFAULT '[]'::jsonb, -- array string pilihan jawaban
+    correct_answer TEXT NOT NULL,
+    points INT NOT NULL DEFAULT 10 CHECK (points > 0),
+    order_index INT NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_quiz_questions_quiz ON quiz_questions(quiz_id, order_index);
+
+CREATE TABLE quiz_attempts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    quiz_id UUID NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+    score INT NOT NULL CHECK (score >= 0 AND score <= 100),
+    is_passed BOOLEAN NOT NULL DEFAULT FALSE,
+    submitted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_quiz_attempts_user ON quiz_attempts(user_id, quiz_id, submitted_at DESC);
 
 -- B2B Companies & Licenses
 CREATE TABLE b2b_companies (
