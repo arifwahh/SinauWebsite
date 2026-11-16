@@ -9,6 +9,7 @@ import (
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var validCourseStatuses = map[string]bool{
@@ -153,6 +154,57 @@ func (h *Handler) CreateVoucher(c *fiber.Ctx) error {
 		return err
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "success", "data": v})
+}
+
+// CreateUserWithRole — FR-90: super_admin membuat akun baru dengan role tertentu secara langsung.
+func (h *Handler) CreateUserWithRole(c *fiber.Ctx) error {
+	var req struct {
+		registerRequest
+		Role string `json:"role"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
+	}
+	birth, err := req.validate()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if !validRoles[req.Role] {
+		return fiber.NewError(fiber.StatusBadRequest, "Role tidak valid (student, internal_instructor, external_instructor, b2b_admin, curator, super_admin)")
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	var phone *string
+	if req.Phone != "" {
+		phone = &req.Phone
+	}
+
+	cx, cancel := ctx(c)
+	defer cancel()
+
+	var u models.User
+	err = database.DB.QueryRow(cx,
+		`INSERT INTO users (email, password_hash, full_name, phone, role, birth_date, is_verified)
+		 VALUES ($1, $2, $3, $4, $5::user_role, $6, TRUE)
+		 RETURNING id, email, full_name, phone, role::text, birth_date, preferred_language, is_verified, created_at`,
+		req.Email, string(hashed), req.FullName, phone, req.Role, birth,
+	).Scan(&u.ID, &u.Email, &u.FullName, &u.Phone, &u.Role, &u.BirthDate, &u.PreferredLanguage, &u.IsVerified, &u.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fiber.NewError(fiber.StatusConflict, "Email sudah terdaftar")
+		}
+		return err
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"status":  "success",
+		"message": "Pengguna dengan role " + u.Role + " berhasil dibuat",
+		"data":    u,
+	})
 }
 
 // UpdateUserRole — FR-90: super_admin mengubah role pengguna (mis. mengangkat instruktur / kurator).

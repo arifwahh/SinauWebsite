@@ -13,6 +13,7 @@ import (
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func testHandler(t *testing.T) *Handler {
@@ -66,6 +67,9 @@ func TestSealOpenKeyRoundTrip(t *testing.T) {
 }
 
 func TestRegisterValidation(t *testing.T) {
+	if err := bcrypt.CompareHashAndPassword([]byte("$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q"), []byte("password123")); err != nil {
+		t.Fatalf("hash seed schema.sql tidak cocok dengan password123: %v", err)
+	}
 	adult := time.Now().AddDate(-20, 0, 0).Format("2006-01-02")
 	child := time.Now().AddDate(-12, 0, 0).Format("2006-01-02")
 
