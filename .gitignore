@@ -1,22 +1,48 @@
-# Environment
+# Private Documentation & Postman Collections
+docs/
+*.postman_collection.json
+*.postman_environment.json
+
+# Environment & Secrets (Wajib Private)
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.crt
+secrets/
 
-# Go
+# Database Dumps & Backups
+*.sql.gz
+*.dump
+*.bak
+postgres_data/
+
+# Go Build & Test Artifacts
 backend/sinau-server
 backend/tmp/
 *.test
 *.out
+coverage.txt
 
-# Flutter
+# Flutter / Android Private Keys & Build
 flutter_app/.dart_tool/
 flutter_app/build/
 flutter_app/.flutter-plugins*
 flutter_app/.packages
+flutter_app/android/key.properties
+*.jks
+*.keystore
 
-# Editor / OS
+# Node / Next.js (Untuk tahap Frontend berikutnya)
+node_modules/
+.next/
+out/
+
+# Editor, AI Assistants & OS
 .idea/
 .vscode/
+.claude/
+.gemini/
 .DS_Store
-.claude/settings.local.json
+Thumbs.db
