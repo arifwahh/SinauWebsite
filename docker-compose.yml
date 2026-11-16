@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: sinau_postgres
+    environment:
+      POSTGRES_USER: sinau_admin
+      POSTGRES_PASSWORD: sinau_secure_password
+      POSTGRES_DB: sinau_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - sinau_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sinau_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - sinau_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sinau_backend
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=sinau_admin
+      - DB_PASSWORD=sinau_secure_password
+      - DB_NAME=sinau_db
+      - REDIS_HOST=redis:6379
+      - JWT_SECRET=sinau_super_secret_jwt_key_2026
+      - PORT=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - sinau_network
+
+volumes:
+  postgres_data:
+
+networks:
+  sinau_network:
+    driver: bridge
