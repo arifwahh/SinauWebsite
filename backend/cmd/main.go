@@ -96,6 +96,7 @@ func main() {
 	admin.Post("/categories", curatorOrAdmin, h.CreateCategory)
 	admin.Patch("/courses/:id/status", curatorOrAdmin, h.ReviewCourseStatus)
 	admin.Post("/vouchers", superAdminOnly, h.CreateVoucher)
+	admin.Post("/users", superAdminOnly, h.CreateUserWithRole)
 	admin.Patch("/users/:id/role", superAdminOnly, h.UpdateUserRole)
 	admin.Get("/analytics/overview", superAdminOnly, h.GetAdminOverview)
 

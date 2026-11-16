@@ -244,3 +244,13 @@ INSERT INTO categories (name, slug, description) VALUES
 ('Pemrograman & Software', 'pemrograman-software', 'Belajar coding, web dev, mobile app, dan DevOps'),
 ('Bisnis & Keuangan', 'bisnis-keuangan', 'Kewirausahaan, akuntansi, digital marketing, dan manajemen'),
 ('Keterampilan Pabrik & Teknis', 'keterampilan-pabrik-teknis', 'K3, operator mesin, logistik, dan teknik industri');
+
+-- Seed Default Users untuk Semua 6 Role (Password semuanya: password123)
+INSERT INTO users (email, password_hash, full_name, phone, role, birth_date, is_verified) VALUES
+('superadmin@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Super Admin Sinau', '08111000001', 'super_admin', '1990-01-01', TRUE),
+('kurator@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Kurator Kursus Sinau', '08111000002', 'curator', '1992-05-10', TRUE),
+('instruktur.internal@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Andi Instruktur Internal', '08111000003', 'internal_instructor', '1993-08-15', TRUE),
+('instruktur.eksternal@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Siti Instruktur Eksternal', '08111000004', 'external_instructor', '1994-11-20', TRUE),
+('hrd.pabrik@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Admin B2B Perusahaan', '08111000005', 'b2b_admin', '1991-03-25', TRUE),
+('pelajar@sinau.id', '$2a$10$2qoRM9I2ydYnnbXpFe03LO5lJ8I8UC/h.y00oC6ZHGl4PW96BKH3q', 'Budi Santoso (Pelajar)', '08123456789', 'student', '2005-04-12', TRUE)
+ON CONFLICT (email) DO NOTHING;
