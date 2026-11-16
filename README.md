@@ -1,156 +1,162 @@
-# Sinau E-Learning Platform — Implementasi SRS v0.2
+# Sinau — Platform E-Learning (Website & Android)
 
-> [!IMPORTANT]
-> ## ✅ Yang Harus Anda Lakukan Sekarang
->
-> **1. Review & commit perubahan terbaru** (perbaikan build + keamanan backend, belum di-commit):
-> ```bash
-> git status
-> git diff
-> git add -A && git commit -m "fix: build errors, JWT/RBAC, refresh token, webhook signature, env config"
-> ```
->
-> **2. Buat file `.env`** (wajib — backend menolak start tanpa secret):
-> ```bash
-> cp .env.example .env
-> openssl rand -hex 32   # tempel ke JWT_SECRET
-> openssl rand -hex 32   # tempel ke OFFLINE_KEY_MASTER
-> ```
-> Isi juga `DB_PASSWORD` dengan password yang kuat.
->
-> **3. Jalankan Docker** (daemon Docker harus aktif):
-> ```bash
-> sudo systemctl start docker
-> docker compose down -v      # hanya jika sebelumnya pernah dijalankan (skema DB berubah)
-> docker compose up --build
-> ```
->
-> **4. Uji cepat** — pastikan semua berhasil:
-> ```bash
-> curl http://localhost:8080/api/v1/health
-> curl -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
->   -d '{"email":"pelajar@sinau.id","password":"password123","full_name":"Budi","birth_date":"2005-04-12"}'
-> curl -X POST http://localhost:8080/api/v1/auth/login -H "Content-Type: application/json" \
->   -d '{"email":"pelajar@sinau.id","password":"password123"}'
-> curl http://localhost:8080/api/v1/auth/me -H "Authorization: Bearer <access_token dari login>"
-> ```
->
-> **5. Siapkan payment gateway (sandbox):**
-> - Ambil **Server Key** dari dashboard Midtrans Sandbox → isi `MIDTRANS_SERVER_KEY` di `.env`.
-> - Ambil **Callback Verification Token** dari dashboard Xendit → isi `XENDIT_CALLBACK_TOKEN`.
-> - Daftarkan URL notifikasi di dashboard: `https://<domain>/api/v1/webhooks/midtrans` dan `https://<domain>/api/v1/webhooks/xendit`.
->
-> **6. Putuskan & kabari developer:**
-> - Apakah kursus **instruktur internal** juga wajib review kurator? (Saat ini langsung terbit; hanya instruktur eksternal yang masuk `draft`.)
->
-> **7. (Opsional) Pasang Go 1.22+** untuk development lokal, lalu jalankan `cd backend && go test ./...`.
->
-> ⚠️ **Perubahan API (breaking):** `/transactions/buy` → `/transactions`; `/webhook/payment` → `/webhooks/midtrans` & `/webhooks/xendit`; login kini mengembalikan `data.access_token` + `data.refresh_token`; register wajib `birth_date`.
->
-> 🔜 **Belum dikerjakan:** integrasi Snap/Invoice gateway sungguhan (masih mock), katalog + filter, modul/pelajaran, progress, kuis, sertifikat, admin panel, website frontend, kode aplikasi Flutter.
+**Sinau** adalah platform e-learning berbasis website dan aplikasi mobile (Flutter) yang dikembangkan oleh **AW More Creative**. Platform ini dirancang agar ringan, hemat kuota, mendukung pembelian kursus secara satuan (*standalone purchase*), serta memiliki fitur unduhan video offline terenkripsi (`AES-256`) untuk perangkat Android.
 
 ---
 
-Repositori ini berisi kerangka awal implementasi teknis untuk **Sinau**, platform e-learning berbasis website dan aplikasi Android yang dikembangkan oleh **AW More Creative** berdasarkan dokumen **Software Requirements Specification (SRS) v0.2** tertanggal 16 November 2026.
+## ✨ Fitur Utama
+
+- **Pembelian Kursus Satuan & Kode Voucher:** Seluruh kursus dijual secara satuan tanpa sistem langganan, dilengkapi dukungan potongan harga/voucher dan integrasi webhook pembayaran (**Midtrans** & **Xendit**).
+- **Manajemen Kurikulum Lengkap:** Struktur materi berlapis (**Kategori → Kursus → Modul/Bab → Pelajaran**) yang mendukung Video HLS, Artikel, PDF, dan Kuis interaktif.
+- **Evaluasi & Sertifikat Otomatis:** Pelacakan progres belajar per pelajaran, penilaian kuis/ujian akhir otomatis, serta penerbitan sertifikat kelulusan lengkap dengan kode verifikasi publik.
+- **Download Video Offline Terenkripsi (`AES-256`):** Menyediakan token enkripsi terikat perangkat (*device fingerprint*) agar video pelajaran dapat ditonton secara offline di aplikasi Android dengan aman.
+- **Keamanan & Multi-Role (RBAC):** Autentikasi berbasis **JWT Access Token** + rotasi **Refresh Token**, *rate limiting*, serta 6 peran pengguna (`student`, `internal_instructor`, `external_instructor`, `b2b_admin`, `curator`, `super_admin`).
 
 ---
 
-## 🏗️ Struktur Arsitektur Proyek
+## 🏗️ Arsitektur & Teknologi
 
-```
+| Komponen | Teknologi |
+|---|---|
+| **Backend API** | Golang 1.22 (`Fiber v2`, `pgx/v5`, `jwt/v5`, `bcrypt`) |
+| **Database & Cache** | PostgreSQL 15 & Redis 7 |
+| **Mobile App** | Flutter (Android & iOS) |
+| **Containerization** | Docker & Docker Compose |
+
+```text
 SinauWebsite/
-├── docs/
-│   └── SRS_Revisi.md               # Spesifikasi Kebutuhan Perangkat Lunak v0.2
-├── database/
-│   └── schema.sql                  # Skema Database PostgreSQL (Users, Courses, Transactions, Offline Tokens)
 ├── backend/
-│   ├── cmd/
-│   │   └── main.go                 # Entrypoint Go Fiber API Server
+│   ├── cmd/main.go                 # Entrypoint REST API Server (Go Fiber)
 │   ├── internal/
-│   │   ├── config/                 # Konfigurasi dari environment
-│   │   ├── database/               # Koneksi Pool PostgreSQL (pgx)
-│   │   ├── handler/                # HTTP Handlers (Auth, Courses, Payments, Offline Download)
-│   │   ├── middleware/             # JWT auth & RBAC
-│   │   └── models/                 # Struktur Data / Domain Models
-│   ├── Dockerfile                  # Dockerfile untuk backend Golang
-│   └── go.mod                      # Go Modules & Dependencies
+│   │   ├── config/                 # Konfigurasi environment & koneksi DSN
+│   │   ├── database/               # Connection pool PostgreSQL (pgxpool)
+│   │   ├── handler/                # HTTP Handlers & Unit Tests
+│   │   ├── middleware/             # Middleware JWT Auth & RBAC
+│   │   └── models/                 # Domain Models
+│   ├── Dockerfile                  # Multi-stage Dockerfile untuk produksi
+│   └── go.mod                      # Go module dependencies
+├── database/
+│   └── schema.sql                  # Skema tabel & seed data PostgreSQL
 ├── flutter_app/
-│   └── pubspec.yaml                # Konfigurasi Flutter App (Offline Encrypted Video Support)
-└── docker-compose.yml              # Orkestrasi Docker (PostgreSQL, Redis, Backend)
+│   └── pubspec.yaml                # Konfigurasi aplikasi mobile Flutter
+├── .env.example                    # Template variabel environment
+└── docker-compose.yml              # Orkestrasi container (Postgres, Redis, Backend)
 ```
 
 ---
 
-## 🚀 Fitur Utama Sesuai SRS v0.2
+## 🚀 Cara Instalasi & Menjalankan Proyek
 
-1. **Pembelian Kursus Satuan (FR-10, FR-11):**
-   - Seluruh kursus dijual secara satuan (*standalone purchase*), tidak ada sistem langganan/subscription.
-   - Integrasi Midtrans / Xendit untuk Virtual Account, E-Wallet, QRIS, dan Kartu Kredit.
-2. **Fitur Download Offline Terenkripsi (FR-24):**
-   - Mendukung pelajar (terutama buruh pabrik / daerah minim kuota) mengunduh video pelajaran ke perangkat Android dengan enkripsi lokal (`AES-256`) via token verifikasi perangkat.
-3. **Backend Berperforma Tinggi (Golang):**
-   - Dibangun menggunakan **Go (Fiber v2)** untuk konkurensi tinggi dan efisiensi resource RAM/CPU.
-4. **Kepatuhan Kebijakan (NFR-09):**
-   - Aplikasi Android (Flutter) tidak memiliki transaksi digital di dalam aplikasi (*in-app purchase*), seluruh transaksi pembayaran diarahkan ke website.
+### Prasyarat
+- **Docker** dan **Docker Compose** sudah terinstal di sistem Anda.
+- *(Opsional)* **Go 1.22+** jika ingin menjalankan backend secara langsung tanpa Docker.
 
----
+### 1. Clone Repositori
+```bash
+git clone <url-repository-github-anda>
+cd SinauWebsite
+```
 
-## 🛠️ Cara Menjalankan Proyek (Development)
-
-### 1. Siapkan Environment
+### 2. Konfigurasi Environment (`.env`)
+Salin file template `.env.example` menjadi `.env`:
 ```bash
 cp .env.example .env
-# isi DB_PASSWORD, lalu generate secret:
-openssl rand -hex 32   # → JWT_SECRET
-openssl rand -hex 32   # → OFFLINE_KEY_MASTER
 ```
-
-### 2. Menjalankan Backend & Database via Docker Compose
+Buat kunci rahasia (`JWT_SECRET` dan `OFFLINE_KEY_MASTER`) menggunakan `openssl`, lalu masukkan ke dalam file `.env` beserta password database Anda:
 ```bash
-docker compose up --build
+# Generate 2 random hex string (64 karakter / 32 byte)
+openssl rand -hex 32
+openssl rand -hex 32
 ```
-Backend API akan berjalan di `http://localhost:8080/api/v1`.
+Contoh isi file `.env`:
+```env
+DB_USER=sinau_admin
+DB_PASSWORD=PasswordDatabaseKuat123
+DB_NAME=sinau_db
 
-> Skema database hanya dijalankan saat volume Postgres pertama kali dibuat.
-> Jika `database/schema.sql` berubah, reset dengan `docker compose down -v`.
+JWT_SECRET=<hasil_openssl_rand_hex_32_pertama>
+OFFLINE_KEY_MASTER=<hasil_openssl_rand_hex_32_kedua>
 
-### 3. Endpoint API
+MIDTRANS_SERVER_KEY=
+XENDIT_CALLBACK_TOKEN=
+CORS_ALLOW_ORIGINS=http://localhost:3000
+```
 
-| Method | Path | Auth | Keterangan |
-|---|---|---|---|
-| GET | `/health` | – | Health check |
-| POST | `/auth/register` | – | Registrasi (wajib `birth_date`, usia ≥ 13) |
-| POST | `/auth/login` | – | Mengembalikan `access_token` + `refresh_token` |
-| POST | `/auth/refresh` | – | Rotasi refresh token |
-| POST | `/auth/logout` | Bearer | Mencabut refresh token |
-| GET | `/auth/me` | Bearer | Profil pengguna |
-| GET | `/courses` | – | Katalog (`?limit=&offset=`) |
-| GET | `/courses/:id` | – | Detail kursus published |
-| POST | `/courses` | Bearer (instruktur / super admin) | Kursus eksternal masuk sebagai `draft` |
-| POST | `/transactions` | Bearer | Beli kursus satuan |
-| GET | `/transactions` | Bearer | Riwayat transaksi |
-| POST | `/webhooks/midtrans` | Signature SHA-512 | Notifikasi Midtrans |
-| POST | `/webhooks/xendit` | Header `x-callback-token` | Callback Xendit |
-| POST | `/offline/token` | Bearer | Kunci AES-256 video offline |
-
-Contoh:
+### 3. Jalankan dengan Docker Compose
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "pelajar@sinau.id", "password": "password123", "full_name": "Budi Santoso", "phone": "08123456789", "birth_date": "2005-04-12"}'
+sudo docker compose up -d --build
+```
+Server API akan berjalan di **`http://localhost:8080/api/v1`**.
 
-curl -X POST http://localhost:8080/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "pelajar@sinau.id", "password": "password123"}'
-
-curl http://localhost:8080/api/v1/auth/me -H "Authorization: Bearer <access_token>"
+Untuk memastikan server berjalan normal:
+```bash
+curl http://localhost:8080/api/v1/health
 ```
 
-> [!NOTE]
-> Pembuatan Snap token Midtrans / Invoice Xendit masih **mock**; integrasi API gateway sungguhan menyusul.
+> **Catatan:** Jika Anda melakukan perubahan pada `database/schema.sql` dan ingin memuat ulang tabel dari awal, jalankan:
+> ```bash
+> sudo docker compose down -v
+> sudo docker compose up -d --build
+> ```
 
 ---
 
-## 📜 Lisensi & Developer
-**Developer:** AW More Creative  
-**Tanggal Rilis SRS:** 16 November 2026
+## 🧪 Menjalankan Unit Test
+
+Anda dapat menjalankan seluruh unit test secara langsung menggunakan Docker (tanpa perlu menginstal Go di mesin lokal):
+
+```bash
+sudo docker run --rm -v "$(pwd)/backend":/app -w /app golang:1.22-alpine go test -v ./...
+```
+
+Atau jika Go 1.22+ sudah terinstal di komputer Anda:
+```bash
+cd backend
+go test -v ./...
+```
+
+---
+
+## 📡 Ringkasan Endpoint API (`/api/v1`)
+
+| Kategori | Method & Endpoint | Akses | Deskripsi |
+|---|---|---|---|
+| **Health** | `GET /health` | Publik | Cek status server API |
+| **Auth** | `POST /auth/register` | Publik | Registrasi akun pelajar baru (usia ≥ 13 tahun) |
+| | `POST /auth/login` | Publik | Login & dapatkan `access_token` + `refresh_token` |
+| | `POST /auth/refresh` | Publik | Rotasi *refresh token* |
+| | `POST /auth/logout` | Bearer | Mencabut *refresh token* aktif |
+| | `GET /auth/me` | Bearer | Mengambil profil pengguna yang sedang login |
+| **Katalog** | `GET /categories` | Publik | Daftar kategori kursus |
+| | `GET /courses` | Publik | Katalog kursus (`?q=&category_id=&level=&min_price=&max_price=&min_rating=`) |
+| | `GET /courses/:id` | Publik | Detail kursus beserta silabus modul & pelajaran |
+| | `GET /courses/:id/reviews` | Publik | Daftar ulasan & rating kursus |
+| **Instruktur** | `POST /courses` | Instruktur / Admin | Membuat kursus baru |
+| | `POST /courses/:id/modules` | Instruktur / Admin | Menambahkan modul/bab ke kursus |
+| | `POST /modules/:id/lessons` | Instruktur / Admin | Menambahkan pelajaran ke modul |
+| | `POST /lessons/:id/quiz` | Instruktur / Admin | Membuat kuis & bank soal pada pelajaran |
+| **Belajar** | `GET /my-courses` | Bearer | Daftar kursus yang dimiliki beserta persentase progres |
+| | `GET /lessons/:id` | Bearer (Enrolled) | Membuka materi pelajaran lengkap |
+| | `POST /lessons/:id/progress` | Bearer (Enrolled) | Menyimpan progres belajar & terbitkan sertifikat otomatis saat 100% |
+| | `GET /lessons/:id/quiz` | Bearer (Enrolled) | Mengambil soal kuis untuk dikerjakan |
+| | `POST /quizzes/:id/submit` | Bearer (Enrolled) | Mengirim jawaban kuis & penilaian otomatis |
+| | `POST /courses/:id/reviews` | Bearer (Enrolled) | Memberikan rating (1–5) & ulasan kursus |
+| | `GET /certificates/my` | Bearer | Daftar sertifikat kelulusan milik pengguna |
+| | `GET /certificates/verify/:code` | Publik | Verifikasi keaslian sertifikat via kode publik |
+| | `POST /offline/token` | Bearer (Enrolled) | Generate kunci `AES-256` untuk unduhan video offline |
+| **Transaksi** | `POST /transactions` | Bearer | Pembelian kursus satuan (mendukung `voucher_code`) |
+| | `GET /transactions` | Bearer | Riwayat transaksi pengguna |
+| | `POST /webhooks/midtrans` | Signature SHA-512 | Webhook notifikasi pembayaran Midtrans |
+| | `POST /webhooks/xendit` | Callback Token | Webhook callback invoice Xendit |
+| **Admin** | `GET /admin/analytics/overview` | Super Admin | Ringkasan metrik pengguna, kelulusan, dan pendapatan |
+| | `POST /admin/users` | Super Admin | Membuat akun baru untuk role spesifik |
+| | `PATCH /admin/users/:id/role` | Super Admin | Mengubah role pengguna |
+| | `POST /admin/vouchers` | Super Admin | Membuat kode promo/voucher diskon |
+| | `POST /admin/categories` | Kurator / Admin | Menambahkan kategori kursus baru |
+| | `PATCH /admin/courses/:id/status`| Kurator / Admin | Menyetujui atau menolak penerbitan kursus |
+
+---
+
+## 📄 Lisensi & Pengembang
+
+Dikembangkan oleh **AW More Creative**. Seluruh hak cipta dilindungi.
