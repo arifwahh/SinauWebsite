@@ -12,7 +12,8 @@ docs/
 *.crt
 secrets/
 
-# Database Dumps & Backups
+# Database Schema, Dumps & Backups (Private)
+database/schema.sql
 *.sql.gz
 *.dump
 *.bak
