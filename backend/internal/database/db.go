@@ -2,40 +2,34 @@ package database
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var DB *pgxpool.Pool
 
-func ConnectDB() {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		getEnv("DB_USER", "sinau_admin"),
-		getEnv("DB_PASSWORD", "sinau_secure_password"),
-		getEnv("DB_HOST", "localhost"),
-		getEnv("DB_PORT", "5432"),
-		getEnv("DB_NAME", "sinau_db"),
-	)
-
+// ConnectDB membuka pool koneksi PostgreSQL dengan retry agar backend
+// tidak langsung mati ketika database belum siap saat container start.
+func ConnectDB(dsn string) {
 	var err error
 	DB, err = pgxpool.New(context.Background(), dsn)
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v\n", err)
+		log.Fatalf("Konfigurasi database tidak valid: %v", err)
 	}
 
-	if err := DB.Ping(context.Background()); err != nil {
-		log.Fatalf("Database ping failed: %v\n", err)
+	const maxAttempts = 10
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err = DB.Ping(ctx)
+		cancel()
+		if err == nil {
+			log.Println("Berhasil terhubung ke PostgreSQL")
+			return
+		}
+		log.Printf("Menunggu database (percobaan %d/%d): %v", attempt, maxAttempts, err)
+		time.Sleep(2 * time.Second)
 	}
-
-	log.Println("Successfully connected to PostgreSQL database!")
-}
-
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
+	log.Fatalf("Gagal terhubung ke database: %v", err)
 }
