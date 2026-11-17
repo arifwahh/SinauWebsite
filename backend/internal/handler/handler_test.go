@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"crypto/rand"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -26,9 +27,8 @@ func testHandler(t *testing.T) *Handler {
 		JWTSecret:           []byte("test-secret-test-secret-test-secret!"),
 		AccessTokenTTL:      time.Minute,
 		OfflineKeyMaster:    master,
-		MidtransServerKey:   "SB-Mid-server-test",
 		XenditCallbackToken: "xendit-test-token",
-	})
+	}, nil)
 }
 
 func makeTestJWT(t *testing.T, secret []byte, userID, role string) string {
@@ -99,7 +99,7 @@ func TestBuildCourseFilterQuery(t *testing.T) {
 	maxP := 250000.0
 	minR := 4.5
 
-	sql, args, err := buildCourseFilterQuery(courseFilterParams{
+	sql, args, limit, offset, err := buildCourseFilterQuery(courseFilterParams{
 		Search:     "golang",
 		CategoryID: 1,
 		Level:      "beginner",
@@ -112,6 +112,9 @@ func TestBuildCourseFilterQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seharusnya valid, dapat error: %v", err)
 	}
+	if limit != 10 || offset != 5 {
+		t.Fatalf("limit=%d offset=%d, seharusnya 10 dan 5", limit, offset)
+	}
 	if !strings.Contains(sql, "title ILIKE $1") || !strings.Contains(sql, "category_id = $2") || !strings.Contains(sql, "level = $3") {
 		t.Fatalf("query SQL tidak sesuai ekspektasi: %s", sql)
 	}
@@ -120,14 +123,14 @@ func TestBuildCourseFilterQuery(t *testing.T) {
 	}
 
 	// Level tidak valid harus ditolak
-	_, _, err = buildCourseFilterQuery(courseFilterParams{Level: "expert_sekali"})
+	_, _, _, _, err = buildCourseFilterQuery(courseFilterParams{Level: "expert_sekali"})
 	if err == nil {
 		t.Fatal("seharusnya gagal untuk level tidak valid")
 	}
 
 	// Rating di luar batas 0..5 harus ditolak
 	badRating := 6.0
-	_, _, err = buildCourseFilterQuery(courseFilterParams{MinRating: &badRating})
+	_, _, _, _, err = buildCourseFilterQuery(courseFilterParams{MinRating: &badRating})
 	if err == nil {
 		t.Fatal("seharusnya gagal untuk min_rating > 5")
 	}
@@ -276,7 +279,6 @@ func newTestApp(h *Handler) *fiber.App {
 	superAdminOnly := middleware.RequireRoles(models.RoleSuperAdmin)
 	curatorOrAdmin := middleware.RequireRoles(models.RoleCurator, models.RoleSuperAdmin)
 
-	app.Post("/webhooks/midtrans", h.MidtransWebhook)
 	app.Post("/webhooks/xendit", h.XenditWebhook)
 	app.Post("/offline/token", auth, h.GenerateOfflineToken)
 	app.Post("/admin/vouchers", auth, superAdminOnly, h.CreateVoucher)
@@ -284,21 +286,30 @@ func newTestApp(h *Handler) *fiber.App {
 	return app
 }
 
+func doRequest(t *testing.T, app *fiber.App, method, path, body, token string) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("%s %s error: %v", method, path, err)
+	}
+	return resp
+}
+
 func TestWebhooksRejectUnsignedRequests(t *testing.T) {
 	app := newTestApp(testHandler(t))
 
-	body := `{"order_id":"SINAU-1","status_code":"200","gross_amount":"100000.00","signature_key":"palsu","transaction_status":"settlement"}`
-	req := httptest.NewRequest("POST", "/webhooks/midtrans", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, _ := app.Test(req)
-	if resp.StatusCode != fiber.StatusUnauthorized {
-		t.Fatalf("midtrans: status %d, harusnya 401", resp.StatusCode)
-	}
-
-	req = httptest.NewRequest("POST", "/webhooks/xendit", bytes.NewBufferString(`{"external_id":"SINAU-1","status":"PAID"}`))
+	req := httptest.NewRequest("POST", "/webhooks/xendit", bytes.NewBufferString(`{"external_id":"SINAU-1","status":"PAID"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-callback-token", "salah")
-	resp, _ = app.Test(req)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("xendit error: %v", err)
+	}
 	if resp.StatusCode != fiber.StatusUnauthorized {
 		t.Fatalf("xendit: status %d, harusnya 401", resp.StatusCode)
 	}
@@ -311,7 +322,10 @@ func TestProtectedRouteRequiresToken(t *testing.T) {
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
-		resp, _ := app.Test(req)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("auth=%q error: %v", auth, err)
+		}
 		if resp.StatusCode != fiber.StatusUnauthorized {
 			t.Fatalf("auth=%q: status %d, harusnya 401", auth, resp.StatusCode)
 		}
@@ -326,28 +340,19 @@ func TestRBACBlocksUnauthorizedRoles(t *testing.T) {
 	curatorToken := makeTestJWT(t, h.cfg.JWTSecret, "user-2", models.RoleCurator)
 
 	// Pelajar mencoba akses endpoint Super Admin (/admin/vouchers) -> harus 403 Forbidden
-	req := httptest.NewRequest("POST", "/admin/vouchers", bytes.NewBufferString(`{"code":"HEMAT50"}`))
-	req.Header.Set("Authorization", "Bearer "+studentToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, _ := app.Test(req)
+	resp := doRequest(t, app, "POST", "/admin/vouchers", `{"code":"HEMAT50"}`, studentToken)
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("student ke /admin/vouchers: status %d, seharusnya 403", resp.StatusCode)
 	}
 
 	// Kurator mencoba akses endpoint khusus Super Admin (/admin/vouchers) -> harus 403 Forbidden
-	req = httptest.NewRequest("POST", "/admin/vouchers", bytes.NewBufferString(`{"code":"HEMAT50"}`))
-	req.Header.Set("Authorization", "Bearer "+curatorToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, _ = app.Test(req)
+	resp = doRequest(t, app, "POST", "/admin/vouchers", `{"code":"HEMAT50"}`, curatorToken)
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("curator ke /admin/vouchers: status %d, seharusnya 403", resp.StatusCode)
 	}
 
 	// Kurator mengakses endpoint review kursus dengan status tidak valid -> lolos RBAC (400 Bad Request, bukan 403)
-	req = httptest.NewRequest("PATCH", "/admin/courses/123/status", bytes.NewBufferString(`{"status":"status_ngawur"}`))
-	req.Header.Set("Authorization", "Bearer "+curatorToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, _ = app.Test(req)
+	resp = doRequest(t, app, "PATCH", "/admin/courses/123/status", `{"status":"status_ngawur"}`, curatorToken)
 	if resp.StatusCode != fiber.StatusBadRequest {
 		t.Fatalf("curator ke /admin/courses/:id/status: status %d, seharusnya 400", resp.StatusCode)
 	}

@@ -2,15 +2,20 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"strings"
 
-	"github.com/awmorecreative/sinau-backend/internal/database"
 	"github.com/awmorecreative/sinau-backend/internal/middleware"
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
 )
+
+const lessonColumns = `id, module_id, title, lesson_type::text, content_url, duration_seconds, order_index, is_free_preview, created_at`
+
+func scanLesson(row pgx.Row, l *models.Lesson) error {
+	return row.Scan(&l.ID, &l.ModuleID, &l.Title, &l.LessonType, &l.ContentURL,
+		&l.DurationSeconds, &l.OrderIndex, &l.IsFreePreview, &l.CreatedAt)
+}
 
 var validLessonTypes = map[string]bool{
 	"video":      true,
@@ -22,10 +27,10 @@ var validLessonTypes = map[string]bool{
 }
 
 // verifyCourseOwnership memastikan user adalah pemilik kursus atau super_admin.
-func verifyCourseOwnership(cx context.Context, courseID, userID, role string) error {
+func (h *Handler) verifyCourseOwnership(cx context.Context, courseID, userID, role string) error {
 	var instructorID *string
-	err := database.DB.QueryRow(cx, `SELECT instructor_id FROM courses WHERE id = $1`, courseID).Scan(&instructorID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	err := h.db.QueryRow(cx, `SELECT instructor_id FROM courses WHERE id = $1`, courseID).Scan(&instructorID)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Kursus tidak ditemukan")
 	} else if err != nil {
 		return err
@@ -57,12 +62,12 @@ func (h *Handler) CreateModule(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	if err := verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
+	if err := h.verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
 		return err
 	}
 
 	var mod models.Module
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`INSERT INTO modules (course_id, title, order_index)
 		 VALUES ($1, $2, $3) RETURNING id, course_id, title, order_index, created_at`,
 		courseID, req.Title, req.OrderIndex,
@@ -106,25 +111,24 @@ func (h *Handler) CreateLesson(c *fiber.Ctx) error {
 	defer cancel()
 
 	var courseID string
-	err := database.DB.QueryRow(cx, `SELECT course_id FROM modules WHERE id = $1`, moduleID).Scan(&courseID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	err := h.db.QueryRow(cx, `SELECT course_id FROM modules WHERE id = $1`, moduleID).Scan(&courseID)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Modul tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
 
-	if err := verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
+	if err := h.verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
 		return err
 	}
 
 	var lesson models.Lesson
-	err = database.DB.QueryRow(cx,
+	err = scanLesson(h.db.QueryRow(cx,
 		`INSERT INTO lessons (module_id, title, lesson_type, content_url, duration_seconds, order_index, is_free_preview)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, module_id, title, lesson_type::text, content_url, duration_seconds, order_index, is_free_preview, created_at`,
+		 RETURNING `+lessonColumns,
 		moduleID, req.Title, req.LessonType, req.ContentURL, req.DurationSeconds, req.OrderIndex, req.IsFreePreview,
-	).Scan(&lesson.ID, &lesson.ModuleID, &lesson.Title, &lesson.LessonType, &lesson.ContentURL,
-		&lesson.DurationSeconds, &lesson.OrderIndex, &lesson.IsFreePreview, &lesson.CreatedAt)
+	), &lesson)
 	if err != nil {
 		return err
 	}
@@ -147,7 +151,7 @@ func (h *Handler) GetLessonDetail(c *fiber.Ctx) error {
 		courseID     string
 		instructorID *string
 	)
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`SELECT l.id, l.module_id, l.title, l.lesson_type::text, l.content_url,
 		        l.duration_seconds, l.order_index, l.is_free_preview, l.created_at,
 		        c.id, c.instructor_id
@@ -158,29 +162,23 @@ func (h *Handler) GetLessonDetail(c *fiber.Ctx) error {
 	).Scan(&lesson.ID, &lesson.ModuleID, &lesson.Title, &lesson.LessonType, &lesson.ContentURL,
 		&lesson.DurationSeconds, &lesson.OrderIndex, &lesson.IsFreePreview, &lesson.CreatedAt,
 		&courseID, &instructorID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Pelajaran tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
 
-	hasAccess := lesson.IsFreePreview ||
-		role == models.RoleSuperAdmin ||
-		role == models.RoleCurator ||
-		(instructorID != nil && *instructorID == userID)
-
-	if !hasAccess {
-		var enrolled bool
-		if err := database.DB.QueryRow(cx,
-			`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-			userID, courseID).Scan(&enrolled); err != nil {
+	if !lesson.IsFreePreview {
+		allowed, err := h.canAccessCourseContent(cx, role, userID, courseID, instructorID)
+		if err != nil {
 			return err
 		}
-		if !enrolled {
+		if !allowed {
 			return fiber.NewError(fiber.StatusForbidden, "Anda harus membeli kursus ini untuk mengakses pelajaran")
 		}
 	}
 
+	lesson.ContentURL = h.rewriteLessonStreamURL(lesson.ID, userID, lesson.IsFreePreview, lesson.ContentURL)
 	return c.JSON(fiber.Map{"status": "success", "data": lesson})
 }
 
@@ -203,10 +201,8 @@ func (h *Handler) CreateOrUpdateReview(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	var enrolled bool
-	if err := database.DB.QueryRow(cx,
-		`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-		userID, courseID).Scan(&enrolled); err != nil {
+	enrolled, err := h.isEnrolled(cx, userID, courseID)
+	if err != nil {
 		if isInvalidInput(err) {
 			return fiber.NewError(fiber.StatusNotFound, "Kursus tidak ditemukan")
 		}
@@ -217,7 +213,7 @@ func (h *Handler) CreateOrUpdateReview(c *fiber.Ctx) error {
 	}
 
 	var rev models.CourseReview
-	err := pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(cx,
 			`INSERT INTO course_reviews (user_id, course_id, rating, comment)
 			 VALUES ($1, $2, $3, $4)
@@ -250,7 +246,7 @@ func (h *Handler) GetCourseReviews(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	rows, err := database.DB.Query(cx,
+	rows, err := h.db.Query(cx,
 		`SELECT r.id, r.user_id, u.full_name, r.course_id, r.rating, r.comment, r.created_at
 		 FROM course_reviews r JOIN users u ON u.id = r.user_id
 		 WHERE r.course_id = $1 ORDER BY r.created_at DESC LIMIT 50`, courseID)

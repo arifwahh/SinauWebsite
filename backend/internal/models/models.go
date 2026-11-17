@@ -116,7 +116,6 @@ type Transaction struct {
 	PaymentGateway string     `json:"payment_gateway"`
 	Status         string     `json:"status"`
 	ExternalTxID   string     `json:"external_transaction_id"`
-	SnapToken      *string    `json:"snap_token,omitempty"`
 	PaidAt         *time.Time `json:"paid_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 }
@@ -163,9 +162,4 @@ type Certificate struct {
 	CertificateCode string    `json:"certificate_code"`
 	PDFURL          string    `json:"pdf_url"`
 	IssuedAt        time.Time `json:"issued_at"`
-}
-
-type OfflineTokenRequest struct {
-	LessonID          string `json:"lesson_id"`
-	DeviceFingerprint string `json:"device_fingerprint"`
 }

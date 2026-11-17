@@ -1,16 +1,21 @@
 package handler
 
 import (
-	"errors"
 	"strings"
 	"time"
 
-	"github.com/awmorecreative/sinau-backend/internal/database"
+	"github.com/awmorecreative/sinau-backend/internal/middleware"
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
 )
+
+const voucherColumns = `id, code, discount_type::text, discount_value, max_discount, min_purchase, usage_limit, used_count, is_active, expires_at`
+
+func scanVoucher(row pgx.Row, v *models.Voucher) error {
+	return row.Scan(&v.ID, &v.Code, &v.DiscountType, &v.DiscountValue, &v.MaxDiscount,
+		&v.MinPurchase, &v.UsageLimit, &v.UsedCount, &v.IsActive, &v.ExpiresAt)
+}
 
 var validCourseStatuses = map[string]bool{
 	models.CourseDraft:     true,
@@ -52,7 +57,7 @@ func (h *Handler) CreateCategory(c *fiber.Ctx) error {
 	defer cancel()
 
 	var cat models.Category
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`INSERT INTO categories (name, slug, description) VALUES ($1, $2, $3)
 		 RETURNING id, name, slug, description, created_at`,
 		req.Name, req.Slug, req.Description,
@@ -84,11 +89,11 @@ func (h *Handler) ReviewCourseStatus(c *fiber.Ctx) error {
 	defer cancel()
 
 	var course models.Course
-	err := scanCourse(database.DB.QueryRow(cx,
+	err := scanCourse(h.db.QueryRow(cx,
 		`UPDATE courses SET status = $2::course_status, updated_at = NOW()
 		 WHERE id = $1 RETURNING `+courseColumns, courseID, req.Status,
 	), &course)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Kursus tidak ditemukan")
 	} else if err != nil {
 		return err
@@ -140,13 +145,12 @@ func (h *Handler) CreateVoucher(c *fiber.Ctx) error {
 	defer cancel()
 
 	var v models.Voucher
-	err := database.DB.QueryRow(cx,
+	err := scanVoucher(h.db.QueryRow(cx,
 		`INSERT INTO vouchers (code, discount_type, discount_value, max_discount, min_purchase, usage_limit, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, code, discount_type::text, discount_value, max_discount, min_purchase, usage_limit, used_count, is_active, expires_at`,
+		 RETURNING `+voucherColumns,
 		req.Code, req.DiscountType, req.DiscountValue, req.MaxDiscount, req.MinPurchase, req.UsageLimit, expiresAt,
-	).Scan(&v.ID, &v.Code, &v.DiscountType, &v.DiscountValue, &v.MaxDiscount, &v.MinPurchase,
-		&v.UsageLimit, &v.UsedCount, &v.IsActive, &v.ExpiresAt)
+	), &v)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fiber.NewError(fiber.StatusConflict, "Kode voucher sudah digunakan")
@@ -165,38 +169,15 @@ func (h *Handler) CreateUserWithRole(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
 	}
-	birth, err := req.validate()
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
 	if !validRoles[req.Role] {
 		return fiber.NewError(fiber.StatusBadRequest, "Role tidak valid (student, internal_instructor, external_instructor, b2b_admin, curator, super_admin)")
-	}
-
-	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-
-	var phone *string
-	if req.Phone != "" {
-		phone = &req.Phone
 	}
 
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	var u models.User
-	err = database.DB.QueryRow(cx,
-		`INSERT INTO users (email, password_hash, full_name, phone, role, birth_date, is_verified)
-		 VALUES ($1, $2, $3, $4, $5::user_role, $6, TRUE)
-		 RETURNING id, email, full_name, phone, role::text, birth_date, preferred_language, is_verified, created_at`,
-		req.Email, string(hashed), req.FullName, phone, req.Role, birth,
-	).Scan(&u.ID, &u.Email, &u.FullName, &u.Phone, &u.Role, &u.BirthDate, &u.PreferredLanguage, &u.IsVerified, &u.CreatedAt)
+	u, err := h.createUser(cx, req.registerRequest, req.Role, true)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return fiber.NewError(fiber.StatusConflict, "Email sudah terdaftar")
-		}
 		return err
 	}
 
@@ -219,18 +200,21 @@ func (h *Handler) UpdateUserRole(c *fiber.Ctx) error {
 	if !validRoles[req.Role] {
 		return fiber.NewError(fiber.StatusBadRequest, "Role tidak valid")
 	}
+	if targetID == middleware.UserID(c) && req.Role != models.RoleSuperAdmin {
+		return fiber.NewError(fiber.StatusBadRequest, "Tidak dapat menurunkan role akun sendiri")
+	}
 
 	cx, cancel := ctx(c)
 	defer cancel()
 
 	var u models.User
-	err := database.DB.QueryRow(cx,
+	err := scanUser(h.db.QueryRow(cx,
 		`UPDATE users SET role = $2::user_role, updated_at = NOW()
 		 WHERE id = $1
-		 RETURNING id, email, full_name, phone, role::text, birth_date, preferred_language, is_verified, created_at`,
+		 RETURNING `+userColumns,
 		targetID, req.Role,
-	).Scan(&u.ID, &u.Email, &u.FullName, &u.Phone, &u.Role, &u.BirthDate, &u.PreferredLanguage, &u.IsVerified, &u.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	), &u)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Pengguna tidak ditemukan")
 	} else if err != nil {
 		return err
@@ -252,7 +236,7 @@ func (h *Handler) GetAdminOverview(c *fiber.Ctx) error {
 		totalRevenue      float64
 		totalCertificates int
 	)
-	err := database.DB.QueryRow(cx, `
+	err := h.db.QueryRow(cx, `
 		SELECT
 		  (SELECT COUNT(*) FROM users),
 		  (SELECT COUNT(*) FROM courses WHERE status = 'published'),
@@ -282,4 +266,112 @@ func (h *Handler) GetAdminOverview(c *fiber.Ctx) error {
 			"total_certificates": totalCertificates,
 		},
 	})
+}
+
+// GetAdminCourses — daftar kursus beserta modul & pelajaran untuk Instruktur (milik sendiri), Kurator, dan Super Admin.
+func (h *Handler) GetAdminCourses(c *fiber.Ctx) error {
+	cx, cancel := ctx(c)
+	defer cancel()
+
+	role := middleware.Role(c)
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if role == models.RoleCurator || role == models.RoleSuperAdmin {
+		rows, err = h.db.Query(cx,
+			`SELECT `+courseColumns+` FROM courses ORDER BY created_at DESC LIMIT 100`)
+	} else {
+		rows, err = h.db.Query(cx,
+			`SELECT `+courseColumns+` FROM courses WHERE instructor_id = $1 ORDER BY created_at DESC LIMIT 100`,
+			middleware.UserID(c))
+	}
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type courseWithCurriculum struct {
+		models.Course
+		Modules []models.Module `json:"modules"`
+	}
+
+	courses := make([]courseWithCurriculum, 0)
+	courseIDs := make([]string, 0)
+	for rows.Next() {
+		var item courseWithCurriculum
+		if err := scanCourse(rows, &item.Course); err != nil {
+			return err
+		}
+		item.Modules = make([]models.Module, 0)
+		courseIDs = append(courseIDs, item.ID)
+		courses = append(courses, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	curricula, err := h.loadCourseCurricula(cx, courseIDs, false)
+	if err != nil {
+		return err
+	}
+	for i := range courses {
+		if mods, ok := curricula[courses[i].ID]; ok {
+			courses[i].Modules = mods
+		}
+	}
+
+	return c.JSON(fiber.Map{"status": "success", "data": courses})
+}
+
+// GetAdminUsers — daftar pengguna untuk Super Admin.
+func (h *Handler) GetAdminUsers(c *fiber.Ctx) error {
+	cx, cancel := ctx(c)
+	defer cancel()
+
+	rows, err := h.db.Query(cx,
+		`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT 100`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	users := make([]models.User, 0)
+	for rows.Next() {
+		var u models.User
+		if err := scanUser(rows, &u); err != nil {
+			return err
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"status": "success", "data": users})
+}
+
+// GetAdminVouchers — daftar voucher diskon untuk Super Admin.
+func (h *Handler) GetAdminVouchers(c *fiber.Ctx) error {
+	cx, cancel := ctx(c)
+	defer cancel()
+
+	rows, err := h.db.Query(cx,
+		`SELECT `+voucherColumns+` FROM vouchers ORDER BY created_at DESC LIMIT 100`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	vouchers := make([]models.Voucher, 0)
+	for rows.Next() {
+		var v models.Voucher
+		if err := scanVoucher(rows, &v); err != nil {
+			return err
+		}
+		vouchers = append(vouchers, v)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"status": "success", "data": vouchers})
 }

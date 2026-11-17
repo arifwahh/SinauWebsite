@@ -10,20 +10,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/awmorecreative/sinau-backend/internal/database"
 	"github.com/awmorecreative/sinau-backend/internal/middleware"
-	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
 )
 
 const offlineTokenTTL = 7 * 24 * time.Hour
 
+type offlineTokenRequest struct {
+	LessonID          string `json:"lesson_id"`
+	DeviceFingerprint string `json:"device_fingerprint"`
+}
+
 // GenerateOfflineToken — FR-24: token & kunci AES-256 untuk video offline.
 // Kunci yang sama dikembalikan untuk kombinasi user + pelajaran + perangkat
 // selama token masih berlaku, sehingga file yang sudah diunduh tetap bisa diputar.
 func (h *Handler) GenerateOfflineToken(c *fiber.Ctx) error {
-	var req models.OfflineTokenRequest
+	var req offlineTokenRequest
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
 	}
@@ -38,13 +41,13 @@ func (h *Handler) GenerateOfflineToken(c *fiber.Ctx) error {
 
 	// Pelajaran harus berupa video dan pengguna harus terdaftar di kursusnya.
 	var lessonType string
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`SELECT l.lesson_type::text FROM lessons l
 		 JOIN modules m ON m.id = l.module_id
 		 JOIN enrollments e ON e.course_id = m.course_id AND e.user_id = $1
 		 WHERE l.id = $2`, userID, req.LessonID,
 	).Scan(&lessonType)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusForbidden, "Anda belum terdaftar di kursus ini atau pelajaran tidak ditemukan")
 	} else if err != nil {
 		return err
@@ -58,7 +61,7 @@ func (h *Handler) GenerateOfflineToken(c *fiber.Ctx) error {
 		tokenID, sealedKey string
 		expiresAt          time.Time
 	)
-	err = database.DB.QueryRow(cx,
+	err = h.db.QueryRow(cx,
 		`SELECT id, encryption_key, expires_at FROM offline_download_tokens
 		 WHERE user_id = $1 AND lesson_id = $2 AND device_fingerprint = $3 AND expires_at > NOW()
 		 ORDER BY expires_at DESC LIMIT 1`, userID, req.LessonID, req.DeviceFingerprint,
@@ -82,7 +85,7 @@ func (h *Handler) GenerateOfflineToken(c *fiber.Ctx) error {
 			return err
 		}
 		expiresAt = time.Now().Add(offlineTokenTTL)
-		if err := database.DB.QueryRow(cx,
+		if err := h.db.QueryRow(cx,
 			`INSERT INTO offline_download_tokens (user_id, lesson_id, device_fingerprint, encryption_key, expires_at)
 			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
 			userID, req.LessonID, req.DeviceFingerprint, sealed, expiresAt,

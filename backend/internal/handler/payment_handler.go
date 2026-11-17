@@ -1,19 +1,22 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"math"
-	"strconv"
+	"net/http"
+	"net/mail"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"github.com/awmorecreative/sinau-backend/internal/database"
 	"github.com/awmorecreative/sinau-backend/internal/middleware"
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
@@ -59,45 +62,99 @@ func calculateVoucherDiscount(price float64, v models.Voucher, now time.Time) (d
 }
 
 // CreateTransaction — FR-10/FR-11/FR-12: pembelian kursus satuan dengan dukungan kode voucher.
-// user_id SELALU diambil dari token, bukan dari body request.
+// Mendukung pembelian oleh tamu (tanpa akun/login terlebih dahulu) maupun pelajar yang sudah login.
 func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 	var req struct {
 		CourseID       string `json:"course_id"`
-		PaymentGateway string `json:"payment_gateway"` // midtrans | xendit
+		PaymentGateway string `json:"payment_gateway"` // xendit
 		VoucherCode    string `json:"voucher_code"`    // opsional (FR-12)
+		Email          string `json:"email"`           // wajib untuk guest checkout
+		FullName       string `json:"full_name"`       // wajib untuk guest checkout
+		Phone          string `json:"phone"`
+		BirthDate      string `json:"birth_date"` // format YYYY-MM-DD, wajib untuk guest checkout
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
 	}
 	if req.PaymentGateway == "" {
-		req.PaymentGateway = "midtrans"
+		req.PaymentGateway = "xendit"
 	}
-	if req.PaymentGateway != "midtrans" && req.PaymentGateway != "xendit" {
-		return fiber.NewError(fiber.StatusBadRequest, "payment_gateway harus 'midtrans' atau 'xendit'")
+	if req.PaymentGateway != "xendit" {
+		return fiber.NewError(fiber.StatusBadRequest, "payment_gateway yang didukung hanya 'xendit'")
 	}
 	req.VoucherCode = strings.ToUpper(strings.TrimSpace(req.VoucherCode))
 	userID := middleware.UserID(c)
 
+	var (
+		buyerEmail     *string
+		buyerName      *string
+		buyerPhone     *string
+		buyerBirthDate *time.Time
+		userIDArg      *string
+	)
+
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	var price float64
-	err := database.DB.QueryRow(cx,
-		`SELECT price FROM courses WHERE id = $1 AND status = 'published'`, req.CourseID).Scan(&price)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if userID != "" {
+		userIDArg = &userID
+	} else {
+		email := strings.ToLower(strings.TrimSpace(req.Email))
+		name := strings.TrimSpace(req.FullName)
+		phone := strings.TrimSpace(req.Phone)
+
+		if addr, err := mail.ParseAddress(email); err != nil || addr.Address != email {
+			return fiber.NewError(fiber.StatusBadRequest, "Format email tidak valid")
+		}
+		if name == "" || utf8.RuneCountInString(name) > 255 {
+			return fiber.NewError(fiber.StatusBadRequest, "Nama lengkap wajib diisi (maks. 255 karakter)")
+		}
+		if phone == "" || len(phone) > 50 {
+			return fiber.NewError(fiber.StatusBadRequest, "Nomor HP / WhatsApp wajib diisi (maks. 50 karakter)")
+		}
+		birth, err := time.Parse("2006-01-02", req.BirthDate)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "Tanggal lahir wajib diisi dengan format YYYY-MM-DD")
+		}
+		if birth.After(time.Now().AddDate(-minimumAge, 0, 0)) {
+			return fiber.NewError(fiber.StatusBadRequest, "Usia minimal untuk mendaftar adalah 13 tahun")
+		}
+		buyerEmail = &email
+		buyerName = &name
+		if phone != "" {
+			buyerPhone = &phone
+		}
+		buyerBirthDate = &birth
+
+		var existingID string
+		err = h.db.QueryRow(cx, `SELECT id FROM users WHERE email = $1`, email).Scan(&existingID)
+		if err == nil {
+			return fiber.NewError(fiber.StatusConflict, "Akun sudah terdaftar, silakan login untuk melakukan pembelian kursus")
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+
+	var (
+		courseTitle string
+		price       float64
+	)
+	err := h.db.QueryRow(cx,
+		`SELECT title, price FROM courses WHERE id = $1 AND status = 'published'`, req.CourseID).Scan(&courseTitle, &price)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Kursus tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
 
-	var enrolled bool
-	if err := database.DB.QueryRow(cx,
-		`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-		userID, req.CourseID).Scan(&enrolled); err != nil {
-		return err
-	}
-	if enrolled {
-		return fiber.NewError(fiber.StatusConflict, "Anda sudah memiliki kursus ini")
+	if userIDArg != nil {
+		enrolled, err := h.isEnrolled(cx, *userIDArg, req.CourseID)
+		if err != nil {
+			return err
+		}
+		if enrolled {
+			return fiber.NewError(fiber.StatusConflict, "Anda sudah memiliki kursus ini")
+		}
 	}
 
 	var (
@@ -108,12 +165,9 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 
 	if req.VoucherCode != "" {
 		var v models.Voucher
-		err := database.DB.QueryRow(cx,
-			`SELECT id, code, discount_type::text, discount_value, max_discount, min_purchase,
-			        usage_limit, used_count, is_active, expires_at
-			 FROM vouchers WHERE code = $1`, req.VoucherCode,
-		).Scan(&v.ID, &v.Code, &v.DiscountType, &v.DiscountValue, &v.MaxDiscount, &v.MinPurchase,
-			&v.UsageLimit, &v.UsedCount, &v.IsActive, &v.ExpiresAt)
+		err := scanVoucher(h.db.QueryRow(cx,
+			`SELECT `+voucherColumns+` FROM vouchers WHERE code = $1`, req.VoucherCode,
+		), &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fiber.NewError(fiber.StatusBadRequest, "Kode voucher tidak ditemukan")
 		} else if err != nil {
@@ -129,27 +183,42 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 
 	// Kursus gratis atau diskon 100%: langsung didaftarkan tanpa payment gateway.
 	if finalAmount == 0 {
-		err := pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+		var setupToken, notifyEmail, notifyName string
+		err := pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
 			if voucherID != nil {
-				if _, err := tx.Exec(cx,
-					`UPDATE vouchers SET used_count = used_count + 1 WHERE id = $1`, *voucherID); err != nil {
+				if err := consumeVoucher(cx, tx, *voucherID); err != nil {
 					return err
 				}
 			}
+			resolvedUID := userIDArg
+			if resolvedUID == nil {
+				uid, tok, err := ensureGuestUser(cx, tx, *buyerEmail, *buyerName, buyerPhone, *buyerBirthDate)
+				if err != nil {
+					return err
+				}
+				resolvedUID = &uid
+				setupToken = tok
+				notifyEmail = *buyerEmail
+				notifyName = *buyerName
+			}
 			_, err := tx.Exec(cx,
 				`INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-				userID, req.CourseID)
+				*resolvedUID, req.CourseID)
 			return err
 		})
 		if err != nil {
 			return err
 		}
+		if notifyEmail != "" {
+			h.sendWelcomeEmail(notifyEmail, notifyName, courseTitle, setupToken)
+		}
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"status":       "success",
-			"amount":       price,
-			"discount":     discount,
-			"final_amount": 0,
-			"message":      "Berhasil terdaftar di kursus",
+			"status":          "success",
+			"amount":          price,
+			"discount":        discount,
+			"final_amount":    0,
+			"account_created": setupToken != "",
+			"message":         "Berhasil terdaftar di kursus",
 		})
 	}
 
@@ -158,15 +227,28 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 		return err
 	}
 
-	// TODO(FR-11): panggil Midtrans Snap API / Xendit Invoice API sungguhan.
-	// Saat ini token & URL pembayaran masih mock.
-	snapToken := "mock-" + externalTxID
+	payerEmail := ""
+	if buyerEmail != nil {
+		payerEmail = *buyerEmail
+	} else if userIDArg != nil {
+		_ = h.db.QueryRow(cx, `SELECT email FROM users WHERE id = $1`, *userIDArg).Scan(&payerEmail)
+	}
+
+	paymentURL := "https://checkout-staging.xendit.co/web/mock-" + externalTxID
+	if h.cfg.XenditSecretKey != "" {
+		invoiceURL, err := h.createXenditInvoice(cx, externalTxID, finalAmount, payerEmail, "Pembelian Kursus: "+courseTitle)
+		if err != nil {
+			return err
+		}
+		paymentURL = invoiceURL
+	}
 
 	var txID string
-	err = database.DB.QueryRow(cx,
-		`INSERT INTO transactions (user_id, course_id, voucher_id, amount, discount, final_amount, payment_gateway, status, external_transaction_id, snap_token)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9) RETURNING id`,
-		userID, req.CourseID, voucherID, price, discount, finalAmount, req.PaymentGateway, externalTxID, snapToken,
+	err = h.db.QueryRow(cx,
+		`INSERT INTO transactions (user_id, course_id, voucher_id, buyer_email, buyer_name, buyer_phone, buyer_birth_date, amount, discount, final_amount, payment_gateway, status, external_transaction_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'xendit', 'pending', $11) RETURNING id`,
+		userIDArg, req.CourseID, voucherID, buyerEmail, buyerName, buyerPhone, buyerBirthDate,
+		price, discount, finalAmount, externalTxID,
 	).Scan(&txID)
 	if err != nil {
 		return err
@@ -179,9 +261,54 @@ func (h *Handler) CreateTransaction(c *fiber.Ctx) error {
 		"amount":                  price,
 		"discount":                discount,
 		"final_amount":            finalAmount,
-		"snap_token":              snapToken,
-		"payment_url":             "https://app.sandbox.midtrans.com/snap/v2/vtweb/" + snapToken,
+		"payment_gateway":         "xendit",
+		"payment_url":             paymentURL,
 	})
+}
+
+func (h *Handler) createXenditInvoice(cx context.Context, externalID string, amount float64, payerEmail, description string) (string, error) {
+	payload := map[string]any{
+		"external_id":          externalID,
+		"amount":               amount,
+		"description":          description,
+		"currency":             "IDR",
+		"success_redirect_url": h.cfg.AppBaseURL + "/payment/success",
+		"failure_redirect_url": h.cfg.AppBaseURL + "/?payment=failed",
+	}
+	if payerEmail != "" {
+		payload["payer_email"] = payerEmail
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(cx, http.MethodPost, "https://api.xendit.co/v2/invoices", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.SetBasicAuth(h.cfg.XenditSecretKey, "")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		log.Printf("Xendit create invoice gagal (%d): %s", resp.StatusCode, string(errBody))
+		return "", fiber.NewError(fiber.StatusBadGateway, "Gagal membuat invoice Xendit")
+	}
+
+	var res struct {
+		InvoiceURL string `json:"invoice_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || res.InvoiceURL == "" {
+		return "", fiber.NewError(fiber.StatusBadGateway, "Respons invoice Xendit tidak valid")
+	}
+	return res.InvoiceURL, nil
 }
 
 // GetMyTransactions — FR-12: riwayat transaksi milik pengguna yang login.
@@ -189,7 +316,7 @@ func (h *Handler) GetMyTransactions(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	rows, err := database.DB.Query(cx,
+	rows, err := h.db.Query(cx,
 		`SELECT id, user_id, course_id, voucher_id, amount, discount, final_amount, payment_gateway, status,
 		        external_transaction_id, paid_at, created_at
 		 FROM transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
@@ -214,58 +341,6 @@ func (h *Handler) GetMyTransactions(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "success", "data": list})
 }
 
-// MidtransWebhook menerima HTTP Notification dari Midtrans.
-// Signature diverifikasi: SHA512(order_id + status_code + gross_amount + ServerKey).
-func (h *Handler) MidtransWebhook(c *fiber.Ctx) error {
-	if h.cfg.MidtransServerKey == "" {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "Webhook Midtrans belum dikonfigurasi")
-	}
-
-	var n struct {
-		OrderID           string `json:"order_id"`
-		StatusCode        string `json:"status_code"`
-		GrossAmount       string `json:"gross_amount"`
-		SignatureKey      string `json:"signature_key"`
-		TransactionStatus string `json:"transaction_status"`
-		FraudStatus       string `json:"fraud_status"`
-		PaymentType       string `json:"payment_type"`
-	}
-	if err := c.BodyParser(&n); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "Payload tidak valid")
-	}
-
-	sum := sha512.Sum512([]byte(n.OrderID + n.StatusCode + n.GrossAmount + h.cfg.MidtransServerKey))
-	expected := hex.EncodeToString(sum[:])
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(strings.ToLower(n.SignatureKey))) != 1 {
-		return fiber.NewError(fiber.StatusUnauthorized, "Signature tidak valid")
-	}
-
-	var newStatus string
-	switch n.TransactionStatus {
-	case "settlement":
-		newStatus = "paid"
-	case "capture":
-		if n.FraudStatus == "accept" || n.FraudStatus == "" {
-			newStatus = "paid"
-		}
-	case "deny", "cancel", "failure":
-		newStatus = "failed"
-	case "expire":
-		newStatus = "expired"
-	}
-	if newStatus == "" {
-		// pending / challenge / status lain: tidak ada perubahan.
-		return c.JSON(fiber.Map{"status": "success", "message": "Diabaikan"})
-	}
-
-	amount, err := strconv.ParseFloat(n.GrossAmount, 64)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "gross_amount tidak valid")
-	}
-
-	return h.applyPaymentStatus(c, n.OrderID, newStatus, amount, n.PaymentType)
-}
-
 // XenditWebhook menerima callback Invoice dari Xendit.
 // Diverifikasi dengan header x-callback-token.
 func (h *Handler) XenditWebhook(c *fiber.Ctx) error {
@@ -288,6 +363,11 @@ func (h *Handler) XenditWebhook(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "Payload tidak valid")
 	}
 
+	// Payload dummy dari tombol "Tes dan simpan" di Dashboard Xendit
+	if n.ExternalID == "invoice_123124123" {
+		return c.JSON(fiber.Map{"status": "success", "message": "Webhook test diterima"})
+	}
+
 	var newStatus string
 	amount := n.PaidAmount
 	switch n.Status {
@@ -303,46 +383,61 @@ func (h *Handler) XenditWebhook(c *fiber.Ctx) error {
 	return h.applyPaymentStatus(c, n.ExternalID, newStatus, amount, n.PaymentMethod)
 }
 
+type paymentEmailNotice struct {
+	email, fullName, courseTitle, setupToken string
+}
+
 // applyPaymentStatus memperbarui status transaksi secara atomik dan idempoten.
 // Hanya transaksi berstatus 'pending' yang dapat berubah; jika dibayar,
-// akses kursus (enrollment) diberikan dalam DB transaction yang sama.
+// akun pelajar dibuat (jika guest) dan akses kursus diberikan dalam DB transaction yang sama.
 func (h *Handler) applyPaymentStatus(c *fiber.Ctx, externalTxID, newStatus string, amount float64, method string) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	err := pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
-		return updateTransaction(cx, tx, externalTxID, newStatus, amount, method)
+	var notice *paymentEmailNotice
+	err := pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
+		var err error
+		notice, err = updateTransaction(cx, tx, externalTxID, newStatus, amount, method)
+		return err
 	})
 	if err != nil {
 		return err
 	}
+	if notice != nil {
+		h.sendWelcomeEmail(notice.email, notice.fullName, notice.courseTitle, notice.setupToken)
+	}
 	return c.JSON(fiber.Map{"status": "success", "message": "Webhook diproses"})
 }
 
-func updateTransaction(cx context.Context, tx pgx.Tx, externalTxID, newStatus string, amount float64, method string) error {
+func updateTransaction(cx context.Context, tx pgx.Tx, externalTxID, newStatus string, amount float64, method string) (*paymentEmailNotice, error) {
 	var (
-		txID, userID, courseID, current string
-		voucherID                       *string
-		finalAmount                     float64
+		txID, courseID, current, courseTitle            string
+		userID, voucherID, buyerEmail, buyerName, phone *string
+		buyerBirth                                      *time.Time
+		finalAmount                                     float64
 	)
 	err := tx.QueryRow(cx,
-		`SELECT id, user_id, course_id, voucher_id, status, final_amount FROM transactions
-		 WHERE external_transaction_id = $1 FOR UPDATE`, externalTxID,
-	).Scan(&txID, &userID, &courseID, &voucherID, &current, &finalAmount)
+		`SELECT t.id, t.user_id, t.course_id, t.voucher_id, t.buyer_email, t.buyer_name,
+		        t.buyer_phone, t.buyer_birth_date, t.status, t.final_amount, c.title
+		 FROM transactions t
+		 JOIN courses c ON c.id = t.course_id
+		 WHERE t.external_transaction_id = $1 FOR UPDATE OF t`, externalTxID,
+	).Scan(&txID, &userID, &courseID, &voucherID, &buyerEmail, &buyerName,
+		&phone, &buyerBirth, &current, &finalAmount, &courseTitle)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fiber.NewError(fiber.StatusNotFound, "Transaksi tidak ditemukan")
+		return nil, fiber.NewError(fiber.StatusNotFound, "Transaksi tidak ditemukan")
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 
 	if current != "pending" {
-		return nil // sudah diproses sebelumnya (idempoten)
+		return nil, nil // sudah diproses sebelumnya (idempoten)
 	}
 
 	if newStatus == "paid" && math.Abs(amount-finalAmount) > 0.01 {
 		log.Printf("PERINGATAN: nominal pembayaran tidak cocok untuk %s (diharapkan %.2f, diterima %.2f)",
 			externalTxID, finalAmount, amount)
-		return fiber.NewError(fiber.StatusBadRequest, "Nominal pembayaran tidak sesuai")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Nominal pembayaran tidak sesuai")
 	}
 
 	var methodArg *string
@@ -351,27 +446,95 @@ func updateTransaction(cx context.Context, tx pgx.Tx, externalTxID, newStatus st
 	}
 
 	if newStatus == "paid" {
+		var resolvedUID string
+		var setupToken string
+		if userID != nil {
+			resolvedUID = *userID
+		} else if buyerEmail != nil && buyerName != nil {
+			birth := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+			if buyerBirth != nil {
+				birth = *buyerBirth
+			}
+			resolvedUID, setupToken, err = ensureGuestUser(cx, tx, *buyerEmail, *buyerName, phone, birth)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, errors.New("transaksi tidak memiliki user_id maupun buyer_email")
+		}
+
 		if _, err := tx.Exec(cx,
-			`UPDATE transactions SET status = 'paid', paid_at = NOW(), payment_method = COALESCE($2, payment_method)
-			 WHERE id = $1`, txID, methodArg); err != nil {
-			return err
+			`UPDATE transactions SET user_id = $2, status = 'paid', paid_at = NOW(), payment_method = COALESCE($3, payment_method)
+			 WHERE id = $1`, txID, resolvedUID, methodArg); err != nil {
+			return nil, err
 		}
 		if voucherID != nil {
-			if _, err := tx.Exec(cx,
-				`UPDATE vouchers SET used_count = used_count + 1 WHERE id = $1`, *voucherID); err != nil {
-				return err
+			if err := consumeVoucher(cx, tx, *voucherID); err != nil {
+				return nil, err
 			}
 		}
-		_, err := tx.Exec(cx,
+		if _, err := tx.Exec(cx,
 			`INSERT INTO enrollments (user_id, course_id) VALUES ($1, $2) ON CONFLICT (user_id, course_id) DO NOTHING`,
-			userID, courseID)
-		return err
+			resolvedUID, courseID); err != nil {
+			return nil, err
+		}
+		if buyerEmail != nil && buyerName != nil {
+			return &paymentEmailNotice{
+				email:       *buyerEmail,
+				fullName:    *buyerName,
+				courseTitle: courseTitle,
+				setupToken:  setupToken,
+			}, nil
+		}
+		return nil, nil
 	}
 
 	_, err = tx.Exec(cx,
 		`UPDATE transactions SET status = $2::payment_status, payment_method = COALESCE($3, payment_method)
 		 WHERE id = $1`, txID, newStatus, methodArg)
-	return err
+	return nil, err
+}
+
+func ensureGuestUser(cx context.Context, tx pgx.Tx, email, fullName string, phone *string, birthDate time.Time) (userID string, setupToken string, err error) {
+	err = tx.QueryRow(cx, `SELECT id FROM users WHERE email = $1`, email).Scan(&userID)
+	if err == nil {
+		return userID, "", nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", err
+	}
+
+	hashed, err := generateRandomPasswordHash()
+	if err != nil {
+		return "", "", err
+	}
+
+	err = tx.QueryRow(cx,
+		`INSERT INTO users (email, password_hash, full_name, phone, role, birth_date, is_verified)
+		 VALUES ($1, $2, $3, $4, 'student', $5, TRUE) RETURNING id`,
+		email, hashed, fullName, phone, birthDate,
+	).Scan(&userID)
+	if err != nil {
+		return "", "", err
+	}
+
+	setupToken, err = createPasswordSetupToken(cx, tx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	return userID, setupToken, nil
+}
+
+func consumeVoucher(cx context.Context, tx pgx.Tx, voucherID string) error {
+	tag, err := tx.Exec(cx,
+		`UPDATE vouchers SET used_count = used_count + 1
+		 WHERE id = $1 AND (usage_limit IS NULL OR used_count < usage_limit)`, voucherID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fiber.NewError(fiber.StatusConflict, "Kuota kode voucher sudah habis")
+	}
+	return nil
 }
 
 func newOrderID() (string, error) {

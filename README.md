@@ -18,6 +18,7 @@
 
 | Komponen | Teknologi |
 |---|---|
+| **Frontend Website** | Next.js 14 (App Router, TypeScript, Tailwind CSS, `hls.js`, Cloudflare Pages Static Export) |
 | **Backend API** | Golang 1.22 (`Fiber v2`, `pgx/v5`, `jwt/v5`, `bcrypt`) |
 | **Database & Cache** | PostgreSQL 15 & Redis 7 |
 | **Mobile App** | Flutter (Android & iOS) |
@@ -35,12 +36,19 @@ SinauWebsite/
 │   │   └── models/                 # Domain Models
 │   ├── Dockerfile                  # Multi-stage Dockerfile untuk produksi
 │   └── go.mod                      # Go module dependencies
+├── frontend/
+│   ├── src/
+│   │   ├── app/                    # Halaman Next.js App Router (Katalog, Checkout, Ruang Belajar, Admin)
+│   │   ├── components/             # Komponen UI (Navbar, dsb.)
+│   │   └── lib/api.ts              # API Client dengan Auto-Refresh JWT Token
+│   ├── Dockerfile                  # Static build & Nginx server (port 3000)
+│   └── next.config.mjs             # Konfigurasi Static Export (Cloudflare Pages)
 ├── database/
 │   └── schema.sql                  # Skema tabel & seed data PostgreSQL
 ├── flutter_app/
 │   └── pubspec.yaml                # Konfigurasi aplikasi mobile Flutter
 ├── .env.example                    # Template variabel environment
-└── docker-compose.yml              # Orkestrasi container (Postgres, Redis, Backend)
+└── docker-compose.yml              # Orkestrasi container (Postgres, Redis, Backend, Frontend)
 ```
 
 ---
@@ -86,7 +94,8 @@ CORS_ALLOW_ORIGINS=http://localhost:3000
 ```bash
 sudo docker compose up -d --build
 ```
-Server API akan berjalan di **`http://localhost:8080/api/v1`**.
+- **Website Frontend (Next.js):** **`http://localhost:3000`**
+- **Server REST API (Golang):** **`http://localhost:8080/api/v1`**
 
 Untuk memastikan server berjalan normal:
 ```bash

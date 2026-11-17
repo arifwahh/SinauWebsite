@@ -5,17 +5,23 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
 
-	"github.com/awmorecreative/sinau-backend/internal/database"
 	"github.com/awmorecreative/sinau-backend/internal/middleware"
 	"github.com/awmorecreative/sinau-backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
 )
+
+const certificateColumns = `cert.id, cert.user_id, u.full_name, cert.course_id, c.title,
+	cert.certificate_code, cert.pdf_url, cert.issued_at`
+
+func scanCertificate(row pgx.Row, cert *models.Certificate) error {
+	return row.Scan(&cert.ID, &cert.UserID, &cert.StudentName, &cert.CourseID, &cert.CourseTitle,
+		&cert.CertificateCode, &cert.PDFURL, &cert.IssuedAt)
+}
 
 // calculateProgressPercentage menghitung persentase penyelesaian kursus (0..100, 2 desimal).
 func calculateProgressPercentage(completedLessons, totalLessons int) (float64, bool) {
@@ -63,7 +69,7 @@ func (h *Handler) GetMyEnrollments(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	rows, err := database.DB.Query(cx,
+	rows, err := h.db.Query(cx,
 		`SELECT e.id, e.user_id, e.course_id, c.title, c.thumbnail_url,
 		        e.progress_percentage, e.is_completed, e.completed_at, e.enrolled_at
 		 FROM enrollments e JOIN courses c ON c.id = e.course_id
@@ -108,20 +114,21 @@ func (h *Handler) UpdateLessonProgress(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	var courseID string
-	err := database.DB.QueryRow(cx,
-		`SELECT m.course_id FROM lessons l JOIN modules m ON m.id = l.module_id WHERE l.id = $1`, lessonID,
-	).Scan(&courseID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	var courseID, lessonType string
+	err := h.db.QueryRow(cx,
+		`SELECT m.course_id, l.lesson_type::text FROM lessons l JOIN modules m ON m.id = l.module_id WHERE l.id = $1`, lessonID,
+	).Scan(&courseID, &lessonType)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Pelajaran tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
+	if req.IsCompleted && lessonType == "quiz" {
+		return fiber.NewError(fiber.StatusBadRequest, "Pelajaran bertipe kuis hanya dapat diselesaikan dengan lulus kuis")
+	}
 
-	var enrolled bool
-	if err := database.DB.QueryRow(cx,
-		`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-		userID, courseID).Scan(&enrolled); err != nil {
+	enrolled, err := h.isEnrolled(cx, userID, courseID)
+	if err != nil {
 		return err
 	}
 	if !enrolled {
@@ -133,7 +140,7 @@ func (h *Handler) UpdateLessonProgress(c *fiber.Ctx) error {
 		isCompleted bool
 		certCode    *string
 	)
-	err = pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(cx,
 			`INSERT INTO lesson_progress (user_id, lesson_id, is_completed, last_position_seconds, updated_at)
 			 VALUES ($1, $2, $3, $4, NOW())
@@ -208,41 +215,49 @@ func recalculateCourseEnrollment(cx context.Context, tx pgx.Tx, userID, courseID
 }
 
 func ensureCertificateIssued(cx context.Context, tx pgx.Tx, userID, courseID string) (string, error) {
-	var existing string
-	err := tx.QueryRow(cx,
-		`SELECT certificate_code FROM certificates WHERE user_id = $1 AND course_id = $2`,
-		userID, courseID).Scan(&existing)
-	if err == nil {
-		return existing, nil
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
-	}
-
 	raw := make([]byte, 6)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
-	code := "CERT-SINAU-" + strings.ToUpper(hex.EncodeToString(raw))
-	pdfURL := fmt.Sprintf("/api/v1/certificates/verify/%s", code)
+	candidate := "CERT-SINAU-" + strings.ToUpper(hex.EncodeToString(raw))
+	pdfURL := fmt.Sprintf("/api/v1/certificates/verify/%s", candidate)
 
-	if _, err := tx.Exec(cx,
+	var code string
+	err := tx.QueryRow(cx,
 		`INSERT INTO certificates (user_id, course_id, certificate_code, pdf_url)
-		 VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, course_id) DO NOTHING`,
-		userID, courseID, code, pdfURL); err != nil {
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (user_id, course_id) DO UPDATE SET certificate_code = certificates.certificate_code
+		 RETURNING certificate_code`,
+		userID, courseID, candidate, pdfURL).Scan(&code)
+	if err != nil {
 		return "", err
 	}
 	return code, nil
+}
+
+type quizQuestionInput struct {
+	QuestionText  string   `json:"question_text"`
+	QuestionType  string   `json:"question_type"`
+	Options       []string `json:"options"`
+	CorrectAnswer string   `json:"correct_answer"`
+	Points        int      `json:"points"`
+}
+
+var validQuestionTypes = map[string]bool{
+	"multiple_choice": true,
+	"true_false":      true,
+	"short_answer":    true,
 }
 
 // CreateQuiz — FR-31, FR-32: instruktur membuat kuis beserta soal-soalnya pada suatu lesson bertipe quiz.
 func (h *Handler) CreateQuiz(c *fiber.Ctx) error {
 	lessonID := c.Params("id")
 	var req struct {
-		Title            string                `json:"title"`
-		PassingScore     int                   `json:"passing_score"`
-		TimeLimitMinutes int                   `json:"time_limit_minutes"`
-		IsFinalExam      bool                  `json:"is_final_exam"`
-		Questions        []models.QuizQuestion `json:"questions"`
+		Title            string              `json:"title"`
+		PassingScore     int                 `json:"passing_score"`
+		TimeLimitMinutes int                 `json:"time_limit_minutes"`
+		IsFinalExam      bool                `json:"is_final_exam"`
+		Questions        []quizQuestionInput `json:"questions"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Body request tidak valid")
@@ -257,15 +272,35 @@ func (h *Handler) CreateQuiz(c *fiber.Ctx) error {
 	if len(req.Questions) == 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "Kuis harus memiliki minimal 1 soal")
 	}
+	for i := range req.Questions {
+		q := &req.Questions[i]
+		q.QuestionText = strings.TrimSpace(q.QuestionText)
+		q.CorrectAnswer = strings.TrimSpace(q.CorrectAnswer)
+		if q.QuestionType == "" {
+			q.QuestionType = "multiple_choice"
+		}
+		if !validQuestionTypes[q.QuestionType] {
+			return fiber.NewError(fiber.StatusBadRequest, "question_type tidak valid (multiple_choice, true_false, short_answer)")
+		}
+		if q.QuestionText == "" || q.CorrectAnswer == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "Setiap soal wajib memiliki pertanyaan dan kunci jawaban")
+		}
+		if q.QuestionType != "short_answer" && len(q.Options) < 2 {
+			return fiber.NewError(fiber.StatusBadRequest, "Soal pilihan ganda/benar-salah minimal memiliki 2 pilihan")
+		}
+		if q.Points <= 0 {
+			q.Points = 10
+		}
+	}
 
 	cx, cancel := ctx(c)
 	defer cancel()
 
 	var courseID, lessonType string
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`SELECT m.course_id, l.lesson_type::text FROM lessons l JOIN modules m ON m.id = l.module_id WHERE l.id = $1`,
 		lessonID).Scan(&courseID, &lessonType)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Pelajaran tidak ditemukan")
 	} else if err != nil {
 		return err
@@ -273,12 +308,12 @@ func (h *Handler) CreateQuiz(c *fiber.Ctx) error {
 	if lessonType != "quiz" {
 		return fiber.NewError(fiber.StatusBadRequest, "Pelajaran ini bukan bertipe quiz")
 	}
-	if err := verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
+	if err := h.verifyCourseOwnership(cx, courseID, middleware.UserID(c), middleware.Role(c)); err != nil {
 		return err
 	}
 
 	var quiz models.Quiz
-	err = pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(cx,
 			`INSERT INTO quizzes (lesson_id, title, passing_score, time_limit_minutes, is_final_exam)
 			 VALUES ($1, $2, $3, $4, $5)
@@ -292,14 +327,6 @@ func (h *Handler) CreateQuiz(c *fiber.Ctx) error {
 		}
 
 		for i, q := range req.Questions {
-			qType := q.QuestionType
-			if qType == "" {
-				qType = "multiple_choice"
-			}
-			pts := q.Points
-			if pts <= 0 {
-				pts = 10
-			}
 			optsJSON, err := json.Marshal(q.Options)
 			if err != nil {
 				return fiber.NewError(fiber.StatusBadRequest, "Format options soal tidak valid")
@@ -309,7 +336,7 @@ func (h *Handler) CreateQuiz(c *fiber.Ctx) error {
 				`INSERT INTO quiz_questions (quiz_id, question_text, question_type, options, correct_answer, points, order_index)
 				 VALUES ($1, $2, $3, $4, $5, $6, $7)
 				 RETURNING id, quiz_id, question_text, question_type::text, points, order_index`,
-				quiz.ID, strings.TrimSpace(q.QuestionText), qType, optsJSON, strings.TrimSpace(q.CorrectAnswer), pts, i+1,
+				quiz.ID, q.QuestionText, q.QuestionType, optsJSON, q.CorrectAnswer, q.Points, i+1,
 			).Scan(&saved.ID, &saved.QuizID, &saved.QuestionText, &saved.QuestionType, &saved.Points, &saved.OrderIndex); err != nil {
 				return err
 			}
@@ -332,32 +359,34 @@ func (h *Handler) GetLessonQuiz(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	var quiz models.Quiz
-	var courseID string
-	err := database.DB.QueryRow(cx,
-		`SELECT q.id, q.lesson_id, q.title, q.passing_score, q.time_limit_minutes, q.is_final_exam, m.course_id
+	var (
+		quiz         models.Quiz
+		courseID     string
+		instructorID *string
+	)
+	err := h.db.QueryRow(cx,
+		`SELECT q.id, q.lesson_id, q.title, q.passing_score, q.time_limit_minutes, q.is_final_exam, m.course_id, c.instructor_id
 		 FROM quizzes q
 		 JOIN lessons l ON l.id = q.lesson_id
 		 JOIN modules m ON m.id = l.module_id
+		 JOIN courses c ON c.id = m.course_id
 		 WHERE q.lesson_id = $1`, lessonID,
-	).Scan(&quiz.ID, &quiz.LessonID, &quiz.Title, &quiz.PassingScore, &quiz.TimeLimitMinutes, &quiz.IsFinalExam, &courseID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	).Scan(&quiz.ID, &quiz.LessonID, &quiz.Title, &quiz.PassingScore, &quiz.TimeLimitMinutes, &quiz.IsFinalExam, &courseID, &instructorID)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Kuis tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
 
-	var enrolled bool
-	if err := database.DB.QueryRow(cx,
-		`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-		userID, courseID).Scan(&enrolled); err != nil {
+	allowed, err := h.canAccessCourseContent(cx, middleware.Role(c), userID, courseID, instructorID)
+	if err != nil {
 		return err
 	}
-	if !enrolled && middleware.Role(c) != models.RoleSuperAdmin {
+	if !allowed {
 		return fiber.NewError(fiber.StatusForbidden, "Anda belum terdaftar di kursus ini")
 	}
 
-	qRows, err := database.DB.Query(cx,
+	qRows, err := h.db.Query(cx,
 		`SELECT id, quiz_id, question_text, question_type::text, options, points, order_index
 		 FROM quiz_questions WHERE quiz_id = $1 ORDER BY order_index ASC`, quiz.ID)
 	if err != nil {
@@ -372,7 +401,9 @@ func (h *Handler) GetLessonQuiz(c *fiber.Ctx) error {
 		if err := qRows.Scan(&q.ID, &q.QuizID, &q.QuestionText, &q.QuestionType, &optsRaw, &q.Points, &q.OrderIndex); err != nil {
 			return err
 		}
-		_ = json.Unmarshal(optsRaw, &q.Options)
+		if err := json.Unmarshal(optsRaw, &q.Options); err != nil {
+			return err
+		}
 		quiz.Questions = append(quiz.Questions, q)
 	}
 	if err := qRows.Err(); err != nil {
@@ -402,30 +433,28 @@ func (h *Handler) SubmitQuiz(c *fiber.Ctx) error {
 		lessonID, courseID string
 		passingScore       int
 	)
-	err := database.DB.QueryRow(cx,
+	err := h.db.QueryRow(cx,
 		`SELECT q.lesson_id, q.passing_score, m.course_id
 		 FROM quizzes q
 		 JOIN lessons l ON l.id = q.lesson_id
 		 JOIN modules m ON m.id = l.module_id
 		 WHERE q.id = $1`, quizID,
 	).Scan(&lessonID, &passingScore, &courseID)
-	if errors.Is(err, pgx.ErrNoRows) || isInvalidInput(err) {
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Kuis tidak ditemukan")
 	} else if err != nil {
 		return err
 	}
 
-	var enrolled bool
-	if err := database.DB.QueryRow(cx,
-		`SELECT EXISTS (SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2)`,
-		userID, courseID).Scan(&enrolled); err != nil {
+	enrolled, err := h.isEnrolled(cx, userID, courseID)
+	if err != nil {
 		return err
 	}
 	if !enrolled {
 		return fiber.NewError(fiber.StatusForbidden, "Anda belum terdaftar di kursus ini")
 	}
 
-	qRows, err := database.DB.Query(cx,
+	qRows, err := h.db.Query(cx,
 		`SELECT id, correct_answer, points FROM quiz_questions WHERE quiz_id = $1`, quizID)
 	if err != nil {
 		return err
@@ -447,7 +476,7 @@ func (h *Handler) SubmitQuiz(c *fiber.Ctx) error {
 	score, passed := gradeQuizSubmission(questions, req.Answers, passingScore)
 
 	var attemptID string
-	err = pgx.BeginFunc(cx, database.DB, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(cx, h.db, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(cx,
 			`INSERT INTO quiz_attempts (user_id, quiz_id, score, is_passed)
 			 VALUES ($1, $2, $3, $4) RETURNING id`,
@@ -488,9 +517,8 @@ func (h *Handler) GetMyCertificates(c *fiber.Ctx) error {
 	cx, cancel := ctx(c)
 	defer cancel()
 
-	rows, err := database.DB.Query(cx,
-		`SELECT cert.id, cert.user_id, u.full_name, cert.course_id, c.title,
-		        cert.certificate_code, cert.pdf_url, cert.issued_at
+	rows, err := h.db.Query(cx,
+		`SELECT `+certificateColumns+`
 		 FROM certificates cert
 		 JOIN users u ON u.id = cert.user_id
 		 JOIN courses c ON c.id = cert.course_id
@@ -503,8 +531,7 @@ func (h *Handler) GetMyCertificates(c *fiber.Ctx) error {
 	certs := make([]models.Certificate, 0)
 	for rows.Next() {
 		var cert models.Certificate
-		if err := rows.Scan(&cert.ID, &cert.UserID, &cert.StudentName, &cert.CourseID, &cert.CourseTitle,
-			&cert.CertificateCode, &cert.PDFURL, &cert.IssuedAt); err != nil {
+		if err := scanCertificate(rows, &cert); err != nil {
 			return err
 		}
 		certs = append(certs, cert)
@@ -522,16 +549,14 @@ func (h *Handler) VerifyCertificate(c *fiber.Ctx) error {
 	defer cancel()
 
 	var cert models.Certificate
-	err := database.DB.QueryRow(cx,
-		`SELECT cert.id, cert.user_id, u.full_name, cert.course_id, c.title,
-		        cert.certificate_code, cert.pdf_url, cert.issued_at
+	err := scanCertificate(h.db.QueryRow(cx,
+		`SELECT `+certificateColumns+`
 		 FROM certificates cert
 		 JOIN users u ON u.id = cert.user_id
 		 JOIN courses c ON c.id = cert.course_id
 		 WHERE cert.certificate_code = $1`, code,
-	).Scan(&cert.ID, &cert.UserID, &cert.StudentName, &cert.CourseID, &cert.CourseTitle,
-		&cert.CertificateCode, &cert.PDFURL, &cert.IssuedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	), &cert)
+	if isNotFound(err) {
 		return fiber.NewError(fiber.StatusNotFound, "Sertifikat tidak ditemukan atau tidak valid")
 	} else if err != nil {
 		return err

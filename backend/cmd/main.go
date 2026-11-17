@@ -18,10 +18,10 @@ import (
 
 func main() {
 	cfg := config.Load()
-	database.ConnectDB(cfg.DSN())
-	defer database.DB.Close()
+	db := database.ConnectDB(cfg.DSN())
+	defer db.Close()
 
-	h := handler.New(cfg)
+	h := handler.New(cfg, db)
 
 	app := fiber.New(fiber.Config{
 		AppName:      "Sinau API Server v0.2",
@@ -55,6 +55,9 @@ func main() {
 	api.Post("/auth/register", authLimiter, h.Register)
 	api.Post("/auth/login", authLimiter, h.Login)
 	api.Post("/auth/refresh", authLimiter, h.Refresh)
+	api.Post("/auth/set-password", authLimiter, h.SetPassword)
+	api.Get("/auth/google", h.GoogleOAuthStart)
+	api.Get("/auth/google/callback", h.GoogleOAuthCallback)
 	api.Post("/auth/logout", auth, h.Logout)
 	api.Get("/auth/me", auth, h.Me)
 
@@ -68,6 +71,7 @@ func main() {
 	api.Post("/courses/:id/modules", auth, instructorOrAdmin, h.CreateModule)
 	api.Post("/modules/:id/lessons", auth, instructorOrAdmin, h.CreateLesson)
 	api.Get("/lessons/:id", auth, h.GetLessonDetail)
+	api.Get("/lessons/:id/stream", h.StreamLessonMedia)
 	api.Get("/courses/:id/reviews", h.GetCourseReviews)
 	api.Post("/courses/:id/reviews", auth, h.CreateOrUpdateReview)
 
@@ -80,22 +84,27 @@ func main() {
 	api.Get("/certificates/my", auth, h.GetMyCertificates)
 	api.Get("/certificates/verify/:code", h.VerifyCertificate)
 
-	// Transaksi & Pembayaran (FR-10, FR-11, FR-12)
-	api.Post("/transactions", auth, h.CreateTransaction)
+	// Transaksi & Pembayaran (FR-10, FR-11, FR-12) — mendukung guest checkout maupun user login
+	api.Post("/transactions", middleware.OptionalAuth(cfg.JWTSecret), h.CreateTransaction)
 	api.Get("/transactions", auth, h.GetMyTransactions)
 
-	// Webhook payment gateway (diverifikasi signature/token, tanpa JWT)
-	api.Post("/webhooks/midtrans", h.MidtransWebhook)
+	// Webhook payment gateway (diverifikasi callback token, tanpa JWT)
 	api.Post("/webhooks/xendit", h.XenditWebhook)
 
 	// Download offline terenkripsi (FR-24)
 	api.Post("/offline/token", auth, h.GenerateOfflineToken)
 
 	// Admin Panel & Kurator (FR-72, FR-90 s/d FR-92)
+	staffRoles := middleware.RequireRoles(
+		models.RoleInternalInstructor, models.RoleExternalInstructor, models.RoleCurator, models.RoleSuperAdmin,
+	)
 	admin := api.Group("/admin", auth)
+	admin.Get("/courses", staffRoles, h.GetAdminCourses)
 	admin.Post("/categories", curatorOrAdmin, h.CreateCategory)
 	admin.Patch("/courses/:id/status", curatorOrAdmin, h.ReviewCourseStatus)
+	admin.Get("/vouchers", superAdminOnly, h.GetAdminVouchers)
 	admin.Post("/vouchers", superAdminOnly, h.CreateVoucher)
+	admin.Get("/users", superAdminOnly, h.GetAdminUsers)
 	admin.Post("/users", superAdminOnly, h.CreateUserWithRole)
 	admin.Patch("/users/:id/role", superAdminOnly, h.UpdateUserRole)
 	admin.Get("/analytics/overview", superAdminOnly, h.GetAdminOverview)

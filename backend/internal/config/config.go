@@ -32,10 +32,22 @@ type Config struct {
 	// Kunci master (32 byte, hex) untuk mengenkripsi kunci AES offline saat disimpan di DB.
 	OfflineKeyMaster []byte
 
-	MidtransServerKey   string
+	XenditSecretKey     string
 	XenditCallbackToken string
 
 	CORSAllowOrigins string
+
+	AppBaseURL string
+	SMTPHost   string
+	SMTPPort   string
+	SMTPUser   string
+	SMTPPass   string
+	SMTPFrom   string
+
+	GoogleServiceAccountJSON string
+	GoogleOAuthClientID      string
+	GoogleOAuthClientSecret  string
+	GoogleOAuthRedirectURL   string
 }
 
 // Load membaca konfigurasi dari environment (dan file .env jika ada).
@@ -55,10 +67,31 @@ func Load() *Config {
 		AccessTokenTTL:  time.Duration(getEnvInt("ACCESS_TOKEN_TTL_MINUTES", 15)) * time.Minute,
 		RefreshTokenTTL: time.Duration(getEnvInt("REFRESH_TOKEN_TTL_DAYS", 30)) * 24 * time.Hour,
 
-		MidtransServerKey:   getEnv("MIDTRANS_SERVER_KEY", ""),
+		XenditSecretKey:     getEnv("XENDIT_SECRET_KEY", ""),
 		XenditCallbackToken: getEnv("XENDIT_CALLBACK_TOKEN", ""),
 
 		CORSAllowOrigins: getEnv("CORS_ALLOW_ORIGINS", "http://localhost:3000"),
+
+		AppBaseURL: strings.TrimRight(getEnv("APP_BASE_URL", "http://localhost:3000"), "/"),
+		SMTPHost:   getEnv("SMTP_HOST", ""),
+		SMTPPort:   getEnv("SMTP_PORT", "587"),
+		SMTPUser:   getEnv("SMTP_USER", ""),
+		SMTPPass:   getEnv("SMTP_PASS", ""),
+		SMTPFrom:   getEnv("SMTP_FROM", "no-reply@sinau.id"),
+
+		GoogleOAuthClientID:     getEnv("GOOGLE_OAUTH_CLIENT_ID", ""),
+		GoogleOAuthClientSecret: getEnv("GOOGLE_OAUTH_CLIENT_SECRET", ""),
+		GoogleOAuthRedirectURL:  getEnv("GOOGLE_OAUTH_REDIRECT_URL", "http://localhost:8080/api/v1/auth/google/callback"),
+	}
+
+	if rawSA := strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON")); rawSA != "" {
+		cfg.GoogleServiceAccountJSON = rawSA
+	} else if saFile := strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_FILE")); saFile != "" {
+		b, err := os.ReadFile(saFile)
+		if err != nil {
+			log.Fatalf("Gagal membaca GOOGLE_SERVICE_ACCOUNT_FILE (%s): %v", saFile, err)
+		}
+		cfg.GoogleServiceAccountJSON = string(b)
 	}
 
 	secret := os.Getenv("JWT_SECRET")
@@ -74,8 +107,8 @@ func Load() *Config {
 	}
 	cfg.OfflineKeyMaster = master
 
-	if cfg.MidtransServerKey == "" {
-		log.Println("PERINGATAN: MIDTRANS_SERVER_KEY kosong — webhook Midtrans akan menolak semua notifikasi")
+	if cfg.XenditSecretKey == "" {
+		log.Println("PERINGATAN: XENDIT_SECRET_KEY kosong — CreateTransaction akan menggunakan URL invoice mock")
 	}
 	if cfg.XenditCallbackToken == "" {
 		log.Println("PERINGATAN: XENDIT_CALLBACK_TOKEN kosong — webhook Xendit akan menolak semua callback")
