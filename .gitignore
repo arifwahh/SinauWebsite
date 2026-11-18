@@ -39,6 +39,7 @@ flutter_app/android/key.properties
 node_modules/
 .next/
 out/
+template_frontend/
 
 # Editor, AI Assistants & OS
 .idea/

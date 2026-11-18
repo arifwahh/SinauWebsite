@@ -27,7 +27,7 @@ function VerifyCertificateContent() {
       );
       setCert(res.data);
     } catch (err: unknown) {
-      setError(errorMessage(err, 'Sertifikat tidak ditemukan atau kode tidak valid.'));
+      setError(errorMessage(err, 'Sertifikat tidak ditemukan. Mohon pastikan kode yang dimasukkan sudah sesuai.'));
     } finally {
       setLoading(false);
     }
@@ -45,35 +45,38 @@ function VerifyCertificateContent() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-12 space-y-8 print:max-w-none print:p-0 print:m-0 print:space-y-0">
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 sm:p-8 shadow-sm print:hidden">
-        <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900">
-          Verifikasi Keaslian Sertifikat Publik (FR-34)
+    <div className="max-w-4xl mx-auto px-4 sm:px-8 py-16 space-y-8 print:max-w-none print:p-0 print:m-0 print:space-y-0">
+      <div className="rounded-xl border border-blue-gray-100 bg-white p-8 shadow-lg shadow-black/5 print:hidden">
+        <p className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1">
+          LAYANAN VERIFIKASI RESMI HRD &amp; PERUSAHAAN
+        </p>
+        <h1 className="text-2xl sm:text-3xl font-bold text-blue-gray-900">
+          Cek Keaslian Sertifikat Lulusan Sinau
         </h1>
-        <p className="text-xs text-slate-500 mt-1">
-          Masukkan nomor seri / kode sertifikat Sinau untuk memeriksa validitas kelulusan peserta secara terbuka.
+        <p className="text-sm text-gray-500 mt-1">
+          Setiap lulusan Sinau telah menyelesaikan materi serta ujian kelulusan terstandar. Masukkan nomor seri sertifikat di bawah ini untuk memastikan keasliannya secara instan.
         </p>
 
-        <form onSubmit={handleSubmit} className="mt-5 flex flex-col sm:flex-row gap-3">
+        <form onSubmit={handleSubmit} className="mt-6 flex flex-col sm:flex-row gap-3">
           <input
             type="text"
             required
             value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase())}
             placeholder="Contoh: CERT-SINAU-A1B2C3D4E5F6"
-            className="flex-1 px-4 py-2.5 rounded-xl border border-slate-300 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="input-md flex-1 font-mono uppercase"
           />
           <button
             type="submit"
             disabled={loading}
-            className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-bold shadow-sm"
+            className="btn-primary shrink-0"
           >
-            {loading ? 'Memeriksa...' : 'Cek Keaslian'}
+            {loading ? 'Memeriksa Data...' : 'Periksa Sertifikat'}
           </button>
         </form>
 
         {error && (
-          <div className="mt-4 p-4 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-700">
+          <div className="mt-4 alert-error">
             ❌ {error}
           </div>
         )}
@@ -136,13 +139,13 @@ function VerifyCertificateContent() {
                 </p>
                 <div className="mt-2 inline-block border-b-2 border-amber-400 pb-1.5 px-6">
                   <h3 className="text-2xl sm:text-4xl font-serif font-extrabold text-slate-900">
-                    {cert.student_name || 'Pelajar Sinau'}
+                    {cert.student_name || 'Alumni Sinau'}
                   </h3>
                 </div>
 
                 {/* Judul Kursus */}
                 <p className="text-xs sm:text-sm text-slate-500 mt-6 max-w-xl mx-auto">
-                  Atas keberhasilan menyelesaikan seluruh materi pembelajaran, evaluasi, dan persyaratan kelulusan pada kursus:
+                  Atas keberhasilan menyelesaikan seluruh materi pembelajaran, latihan, dan evaluasi kelulusan pada kelas:
                 </p>
                 <h4 className="text-lg sm:text-2xl font-extrabold text-blue-800 mt-2 max-w-2xl mx-auto">
                   {cert.course_title}
@@ -152,7 +155,7 @@ function VerifyCertificateContent() {
                 <div className="mt-10 pt-6 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-6 items-end text-xs text-slate-600">
                   <div className="sm:text-left">
                     <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-                      Tanggal Terbit
+                      Tanggal Kelulusan
                     </div>
                     <div className="font-bold text-slate-900 mt-0.5">
                       {new Date(cert.issued_at).toLocaleDateString('id-ID', {
@@ -167,19 +170,19 @@ function VerifyCertificateContent() {
                     <div className="w-14 h-14 rounded-full border-2 border-amber-500 bg-amber-50 flex flex-col items-center justify-center text-amber-700 shadow-inner">
                       <span className="text-[9px] font-black tracking-widest uppercase">SINAU</span>
                       <span className="text-base leading-none font-bold">★</span>
-                      <span className="text-[8px] font-bold uppercase">VERIFIED</span>
+                      <span className="text-[8px] font-bold uppercase">RESMI</span>
                     </div>
                   </div>
 
                   <div className="sm:text-right">
                     <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-                      Kode Verifikasi Resmi
+                      Nomor Seri Sertifikat
                     </div>
                     <code className="font-mono font-bold text-blue-900 mt-0.5 inline-block">
                       {cert.certificate_code}
                     </code>
                     <div className="text-[10px] text-slate-400 mt-2">
-                      Disahkan secara digital oleh <strong className="text-slate-700">Sinau Academy</strong>
+                      Disahkan secara resmi oleh <strong className="text-slate-700">Sinau Academy</strong>
                     </div>
                   </div>
                 </div>
@@ -191,9 +194,9 @@ function VerifyCertificateContent() {
             <button
               type="button"
               onClick={() => window.print()}
-              className="px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-sm"
+              className="btn-primary"
             >
-              🖨️ Cetak / Simpan sebagai PDF
+              🖨️ Cetak / Unduh Sertifikat (PDF)
             </button>
           </div>
         </div>
@@ -206,8 +209,8 @@ export default function VerifyCertificatePage() {
   return (
     <Suspense
       fallback={
-        <div className="max-w-3xl mx-auto px-4 py-12 text-center text-sm text-slate-500">
-          Memuat halaman verifikasi...
+        <div className="max-w-3xl mx-auto px-4 py-12 text-center text-sm text-gray-500">
+          Menyiapkan halaman verifikasi sertifikat...
         </div>
       }
     >

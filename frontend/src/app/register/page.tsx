@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
@@ -36,122 +37,132 @@ export default function RegisterPage() {
           password,
         }),
       });
-      setSuccess('Registrasi berhasil! Mengalihkan ke halaman login...');
+      setSuccess('Pendaftaran berhasil! Mengarahkan Anda ke halaman masuk...');
       setTimeout(() => {
         router.push('/login');
       }, 1200);
     } catch (err: unknown) {
-      setError(errorMessage(err, 'Registrasi gagal. Periksa kembali data Anda.'));
+      setError(errorMessage(err, 'Pendaftaran belum berhasil. Mohon periksa kembali data Anda.'));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="max-w-md mx-auto px-4 py-12">
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
-        <div className="text-center mb-6">
-          <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white font-bold text-xl flex items-center justify-center mx-auto mb-3 shadow-sm">
-            S
+    <div className="relative min-h-[75vh] w-full flex items-center justify-center px-4 sm:px-10 py-16 overflow-hidden">
+      <Image
+        width={1200}
+        height={1200}
+        src="/image/image8.svg"
+        alt="Mulai Belajar di Sinau"
+        className="hidden lg:block absolute inset-0 ml-auto w-[720px] h-[680px] rounded-bl-[100px] object-cover object-center opacity-85 pointer-events-none"
+      />
+
+      <div className="container mx-auto relative z-10">
+        <div className="max-w-md mx-auto lg:mx-0 lg:ml-12 rounded-xl border border-white bg-white/95 p-8 shadow-lg shadow-black/10 backdrop-blur-sm backdrop-saturate-200">
+          <div className="mb-6">
+            <p className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1">
+              LANGKAH AWAL KARIER IMPIAN
+            </p>
+            <h1 className="text-2xl sm:text-3xl font-bold text-blue-gray-900">
+              Mulai Belajar di Sinau Sekarang
+            </h1>
+            <p className="text-sm text-gray-500 mt-1">
+              Daftar gratis dalam 1 menit dan pilih kelas keahlian yang paling Anda butuhkan.
+            </p>
           </div>
-          <h1 className="text-xl font-bold text-slate-900">Daftar Akun Pelajar Baru</h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Mulai belajar keterampilan baru dengan kursus satuan hemat kuota
+
+          {error && <div className="alert-error mb-4">{error}</div>}
+          {success && <div className="alert-success mb-4">{success}</div>}
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-gray-800 mb-1.5">
+                Nama Lengkap <span className="text-gray-400 font-normal normal-case">(Tercantum di Sertifikat)</span> *
+              </label>
+              <input
+                type="text"
+                required
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="Contoh: Budi Santoso"
+                className="input-md"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-gray-800 mb-1.5">
+                Alamat Email Aktif *
+              </label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="nama@email.com"
+                className="input-md"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-gray-800 mb-1.5">
+                Nomor WhatsApp / HP
+              </label>
+              <input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="08123456789"
+                className="input-md"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-gray-800 mb-1.5">
+                Tanggal Lahir * <span className="text-gray-400 font-normal normal-case">(Terbuka mulai usia 13 tahun)</span>
+              </label>
+              <input
+                type="date"
+                required
+                max={maxBirthDate}
+                value={birthDate}
+                onChange={(e) => setBirthDate(e.target.value)}
+                className="input-md"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-blue-gray-800 mb-1.5">
+                Buat Kata Sandi * <span className="text-gray-400 font-normal normal-case">(Minimal 8 karakter)</span>
+              </label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                maxLength={72}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Minimal 8 karakter"
+                className="input-md"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full"
+            >
+              {loading ? 'Menyiapkan Akun Anda...' : 'Daftar & Mulai Belajar'}
+            </button>
+          </form>
+
+          <p className="text-center text-xs text-gray-500 mt-6">
+            Sudah memiliki akun Sinau?{' '}
+            <Link href="/login" className="font-bold text-gray-900 underline hover:text-gray-700">
+              Masuk di Sini
+            </Link>
           </p>
         </div>
-
-        {error && (
-          <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-medium text-red-700">
-            {error}
-          </div>
-        )}
-        {success && (
-          <div className="mb-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-700">
-            {success}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Lengkap *</label>
-            <input
-              type="text"
-              required
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              placeholder="Contoh: Budi Santoso"
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Alamat Email *</label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="nama@email.com"
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Nomor HP / WhatsApp</label>
-            <input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="08123456789"
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Tanggal Lahir * <span className="text-slate-400 font-normal">(Minimal usia 13 tahun — NFR-06)</span>
-            </label>
-            <input
-              type="date"
-              required
-              max={maxBirthDate}
-              value={birthDate}
-              onChange={(e) => setBirthDate(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Password * <span className="text-slate-400 font-normal">(8–72 karakter)</span>
-            </label>
-            <input
-              type="password"
-              required
-              minLength={8}
-              maxLength={72}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Minimal 8 karakter"
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold text-sm shadow-sm transition-colors"
-          >
-            {loading ? 'Mendaftarkan Akun...' : 'Buat Akun Pelajar'}
-          </button>
-        </form>
-
-        <p className="text-center text-xs text-slate-500 mt-6">
-          Sudah punya akun?{' '}
-          <Link href="/login" className="font-semibold text-blue-600 hover:underline">
-            Masuk di Sini
-          </Link>
-        </p>
       </div>
     </div>
   );

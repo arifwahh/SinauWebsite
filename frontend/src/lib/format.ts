@@ -17,12 +17,12 @@ export const ROLE_LABELS: Record<UserRole, string> = {
 };
 
 export const LESSON_TYPE_META: Record<LessonType, { icon: string; label: string }> = {
-  video: { icon: '🎬', label: 'Video HLS' },
-  article: { icon: '📄', label: 'Artikel' },
-  pdf: { icon: '📑', label: 'Modul PDF' },
-  quiz: { icon: '📝', label: 'Kuis' },
-  task: { icon: '📌', label: 'Tugas' },
-  live_class: { icon: '🎥', label: 'Live Class' },
+  video: { icon: '🎬', label: 'Video Materi' },
+  article: { icon: '📄', label: 'Bacaan Praktis' },
+  pdf: { icon: '📑', label: 'Modul Panduan (PDF)' },
+  quiz: { icon: '📝', label: 'Latihan Pemahaman' },
+  task: { icon: '📌', label: 'Praktik Mandiri' },
+  live_class: { icon: '🎥', label: 'Sesi Live' },
 };
 
 export function formatRupiah(amount: number): string {

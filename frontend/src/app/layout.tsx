@@ -1,11 +1,12 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 
 export const metadata: Metadata = {
-  title: 'Sinau — Platform E-Learning Satuan & Hemat Kuota',
+  title: 'Sinau — Kuasai Keahlian Baru & Raih Karier Impian (Sekali Bayar Selamanya)',
   description:
-    'Platform pembelajaran online & offline terenkripsi untuk pelajar, mahasiswa, profesional, dan pekerja industri. Beli kursus satuan sekali bayar.',
+    'Tempat belajar keterampilan praktis untuk pelajar, mahasiswa, dan pekerja. Pilih kelas yang Anda butuhkan, cukup bayar sekali tanpa langganan bulanan, hemat kuota, dan raih sertifikat resmi siap kerja.',
 };
 
 export default function RootLayout({
@@ -15,24 +16,18 @@ export default function RootLayout({
 }) {
   return (
     <html lang="id">
-      <body className="min-h-screen flex flex-col">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body className="min-h-screen flex flex-col bg-white text-blue-gray-900 font-sans">
         <Navbar />
         <main className="flex-1">{children}</main>
-        <footer className="bg-white border-t border-slate-200 mt-16 print:hidden">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-            <div>
-              <span className="font-semibold text-slate-800">Sinau E-Learning</span> — Dikembangkan oleh{' '}
-              <span className="font-medium text-slate-700">AW More Creative</span>.
-            </div>
-            <div className="flex flex-wrap gap-4">
-              <span>Beli Kursus Satuan (Tanpa Langganan)</span>
-              <span>•</span>
-              <span>Mode Video Hemat Kuota 360p</span>
-              <span>•</span>
-              <span>Patuh UU PDP No. 27/2022</span>
-            </div>
-          </div>
-        </footer>
+        <Footer />
       </body>
     </html>
   );
